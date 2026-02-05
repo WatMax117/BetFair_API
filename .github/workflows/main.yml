@@ -27,4 +27,5 @@ jobs:
 
       - name: Validate Docker Compose Config
         run: |
-          docker compose config
+          # We use --no-interpolate to avoid errors with ${VAR:-default} syntax in CI
+          docker compose config --no-interpolate
