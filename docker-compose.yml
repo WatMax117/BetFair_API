@@ -1,0 +1,66 @@
+# NetBet – Unified stack: auth-service + postgres + streaming-client (same network)
+# Run from /opt/netbet: docker compose up -d --build
+# Ensure /opt/netbet/auth-service/ exists (with .env, certs/, Dockerfile, src).
+
+services:
+  auth-service:
+    build:
+      context: ./auth-service
+    image: netbet-auth-service:latest
+    container_name: netbet-auth-service
+    restart: unless-stopped
+    env_file:
+      - ./auth-service/.env
+    environment:
+      - BETFAIR_CERT_PATH=/certs/client-2048.p12
+      - TOKEN_FILE_PATH=/data/ssoid
+      - API_HOST=0.0.0.0
+      - API_PORT=8080
+    volumes:
+      - ./auth-service/certs:/certs:ro
+      - auth-data:/data
+    ports:
+      - "8080:8080"
+
+  netbet-postgres:
+    image: postgres:16-alpine
+    container_name: netbet-postgres
+    environment:
+      POSTGRES_USER: netbet
+      POSTGRES_PASSWORD: netbet
+      POSTGRES_DB: netbet
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Host scripts at /opt/netbet/scripts → container /scripts (for golden_audit.sql etc.)
+      - ./scripts:/scripts:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U netbet -d netbet"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  netbet-streaming-client:
+    build: .
+    container_name: netbet-streaming-client
+    restart: unless-stopped
+    depends_on:
+      auth-service:
+        condition: service_started
+      netbet-postgres:
+        condition: service_healthy
+    env_file:
+      - ./auth-service/.env
+    environment:
+      BETFAIR_TOKEN_URL: http://auth-service:8080/token
+      SPRING_DATASOURCE_URL: jdbc:postgresql://netbet-postgres:5432/netbet
+      SPRING_DATASOURCE_USERNAME: netbet
+      SPRING_DATASOURCE_PASSWORD: netbet
+      BETFAIR_POSTGRES_SINK_ENABLED: "true"
+    ports:
+      - "8081:8080"
+
+volumes:
+  auth-data:
+  pgdata:

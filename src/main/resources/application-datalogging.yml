@@ -1,0 +1,13 @@
+# Profile for 10-minute CSV data logging of a live football market
+# Run: mvn spring-boot:run -Dspring-boot.run.profiles=datalogging -Dspring-boot.run.arguments=--betfair.market-id=1.234567890
+# Or: .\scripts\run_data_logging.ps1
+spring:
+  config:
+    activate:
+      on-profile: datalogging
+
+betfair:
+  stream-duration-minutes: 10
+  csv-logging:
+    enabled: true
+    output-dir: ./logs

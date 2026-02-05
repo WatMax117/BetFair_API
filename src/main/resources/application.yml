@@ -1,0 +1,50 @@
+# All parameters loaded from env; on VPS use /opt/netbet/auth-service/.env (see EnvConfig)
+spring:
+  application:
+    name: betfair-streaming-client
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/netbet}
+    username: ${SPRING_DATASOURCE_USERNAME:netbet}
+    password: ${SPRING_DATASOURCE_PASSWORD:netbet}
+    driver-class-name: org.postgresql.Driver
+  flyway:
+    enabled: ${FLYWAY_ENABLED:true}
+    locations: classpath:db/migration
+
+betfair:
+  token-url: ${BETFAIR_TOKEN_URL:http://auth-service:8080/token}
+  app-key: ${BETFAIR_APP_KEY:}
+  stream-host: ${BETFAIR_STREAM_HOST:stream-api.betfair.com}
+  stream-port: ${BETFAIR_STREAM_PORT:443}
+  # 2MB allows initial snapshot for ~64 markets (priority subscription); 128KB was too small
+  max-line-bytes: ${BETFAIR_MAX_LINE_BYTES:2097152}
+  heartbeat-ms: ${BETFAIR_HEARTBEAT_MS:5000}
+  conflate-ms: ${BETFAIR_CONFLATE_MS:0}
+  ladder-levels: ${BETFAIR_LADDER_LEVELS:8}
+  env-path: ${BETFAIR_ENV_PATH:/opt/netbet/auth-service/.env}
+  market-id: ${BETFAIR_MARKET_ID:}
+  # market-ids: set via BETFAIR_MARKET_IDS (comma-separated) or leave empty for priority 40 events x 5 markets
+  market-ids: []
+  priority-subscription-enabled: ${BETFAIR_PRIORITY_SUBSCRIPTION_ENABLED:true}
+  stream-duration-minutes: ${BETFAIR_STREAM_DURATION_MINUTES:0}
+  reconnect-enabled: ${BETFAIR_RECONNECT_ENABLED:true}
+  csv-logging:
+    enabled: ${BETFAIR_CSV_LOGGING:false}
+    output-dir: ${BETFAIR_CSV_OUTPUT_DIR:./logs}
+  betting-api-url: ${BETFAIR_BETTING_API_URL:https://api.betfair.com/exchange/betting/json-rpc/v1}
+  metadata-cache:
+    ttl-hours: ${BETFAIR_METADATA_TTL_HOURS:24}
+    missing-ttl-minutes: ${BETFAIR_METADATA_MISSING_TTL_MINUTES:30}
+  metadata-admin-user: ${BETFAIR_METADATA_ADMIN_USER:admin}
+  metadata-admin-password: ${BETFAIR_METADATA_ADMIN_PASSWORD:changeme}
+  metadata-hydrator:
+    batch-interval-ms: ${BETFAIR_METADATA_BATCH_INTERVAL_MS:500}
+    batch-size: ${BETFAIR_METADATA_BATCH_SIZE:25}
+    min-interval-ms: ${BETFAIR_METADATA_MIN_INTERVAL_MS:200}
+    api-delay-ms: ${BETFAIR_METADATA_API_DELAY_MS:1000}
+    first-transient-backoff-ms: ${BETFAIR_METADATA_FIRST_TRANSIENT_BACKOFF_MS:5000}
+    consecutive-transient-backoff-ms: ${BETFAIR_METADATA_CONSECUTIVE_TRANSIENT_BACKOFF_MS:10000}
+  postgres-sink:
+    enabled: ${BETFAIR_POSTGRES_SINK_ENABLED:false}
+    flush-interval-ms: ${BETFAIR_POSTGRES_SINK_FLUSH_INTERVAL_MS:500}
+    batch-size: ${BETFAIR_POSTGRES_SINK_BATCH_SIZE:200}

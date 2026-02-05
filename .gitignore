@@ -1,0 +1,42 @@
+# Java / Maven
+target/
+*.class
+*.jar
+*.war
+*.ear
+*.log
+.mvn/wrapper/maven-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker / env (keep .env.example if you add one)
+.env
+.env.local
+*.p12
+logs/
+
+# Build / runtime
+out/
+build/
+*.pid
+
+# Python (if any scripts use venv)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local data (do not commit)
+analysis_data/
+*.csv
+!scripts/**/*.csv
