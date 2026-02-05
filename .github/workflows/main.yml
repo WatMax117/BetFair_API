@@ -22,9 +22,8 @@ jobs:
           cache: 'maven'
 
       - name: Build Java Client (Maven)
-        run: |
-          cd betfair-streaming-client
-          mvn clean package -DskipTests
+        working-directory: ./betfair-streaming-client
+        run: mvn clean package -DskipTests
 
       - name: Validate Docker Compose Config
         run: |
