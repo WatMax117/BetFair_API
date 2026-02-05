@@ -1,0 +1,31 @@
+name: NetBet CI (Build & Validate)
+
+on:
+  push:
+    branches: [ master ] # Verify if your branch is 'master' or 'main'
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build-and-validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Build Java Client (Maven)
+        run: |
+          cd betfair-streaming-client
+          mvn clean package -DskipTests
+
+      - name: Validate Docker Compose Config
+        run: |
+          docker compose config
