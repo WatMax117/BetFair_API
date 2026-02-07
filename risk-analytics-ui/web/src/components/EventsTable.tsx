@@ -1,0 +1,104 @@
+import Table from '@mui/material/Table'
+import TableBody from '@mui/material/TableBody'
+import TableCell from '@mui/material/TableCell'
+import TableContainer from '@mui/material/TableContainer'
+import TableHead from '@mui/material/TableHead'
+import TableRow from '@mui/material/TableRow'
+import Paper from '@mui/material/Paper'
+import Typography from '@mui/material/Typography'
+import Tooltip from '@mui/material/Tooltip'
+import IconButton from '@mui/material/IconButton'
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined'
+import type { EventItem } from '../api'
+
+function formatTime(iso: string | null): string {
+  if (!iso) return '—'
+  try {
+    const d = new Date(iso)
+    return d.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
+  } catch {
+    return iso
+  }
+}
+
+function num(v: number | null): string {
+  if (v == null) return '—'
+  return Number.isInteger(v) ? String(v) : v.toFixed(2)
+}
+
+export function EventsTable({
+  events,
+  onSelectEvent,
+  extremeThreshold,
+}: {
+  events: EventItem[]
+  onSelectEvent: (e: EventItem) => void
+  extremeThreshold: number
+}) {
+  const metaTooltip = (e: EventItem) =>
+    `depth_limit: ${e.depth_limit ?? '—'}, calculation_version: ${e.calculation_version ?? '—'}`
+  const isExtreme = (e: EventItem) =>
+    (e.home_risk != null && Math.abs(e.home_risk) > extremeThreshold) ||
+    (e.away_risk != null && Math.abs(e.away_risk) > extremeThreshold) ||
+    (e.draw_risk != null && Math.abs(e.draw_risk) > extremeThreshold)
+
+  if (events.length === 0) {
+    return (
+      <Typography color="text.secondary">No events in this league for the selected window.</Typography>
+    )
+  }
+
+  return (
+    <TableContainer component={Paper} variant="outlined">
+      <Table size="small">
+        <TableHead>
+          <TableRow>
+            <TableCell>Start time</TableCell>
+            <TableCell>Event</TableCell>
+            <TableCell align="right">Home</TableCell>
+            <TableCell align="right">Away</TableCell>
+            <TableCell align="right">Draw</TableCell>
+            <TableCell align="right">Index H</TableCell>
+            <TableCell align="right">Index A</TableCell>
+            <TableCell align="right">Index D</TableCell>
+            <TableCell align="right">Volume</TableCell>
+            <TableCell>Last update</TableCell>
+            <TableCell padding="none" width={40} />
+          </TableRow>
+        </TableHead>
+        <TableBody>
+          {events.map((e) => (
+            <TableRow
+              key={e.market_id}
+              hover
+              onClick={() => onSelectEvent(e)}
+              sx={{
+                cursor: 'pointer',
+                bgcolor: isExtreme(e) ? 'action.hover' : undefined,
+                '&:hover': { bgcolor: 'action.selected' },
+              }}
+            >
+              <TableCell>{formatTime(e.event_open_date)}</TableCell>
+              <TableCell>{e.event_name || e.market_id}</TableCell>
+              <TableCell align="right">{num(e.home_best_back)}</TableCell>
+              <TableCell align="right">{num(e.away_best_back)}</TableCell>
+              <TableCell align="right">{num(e.draw_best_back)}</TableCell>
+              <TableCell align="right">{num(e.home_risk)}</TableCell>
+              <TableCell align="right">{num(e.away_risk)}</TableCell>
+              <TableCell align="right">{num(e.draw_risk)}</TableCell>
+              <TableCell align="right">{num(e.total_volume)}</TableCell>
+              <TableCell>{formatTime(e.latest_snapshot_at)}</TableCell>
+              <TableCell padding="none" onClick={(ev) => ev.stopPropagation()}>
+                <Tooltip title={metaTooltip(e)}>
+                  <IconButton size="small" aria-label="depth_limit and calculation_version">
+                    <InfoOutlinedIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </TableContainer>
+  )
+}
