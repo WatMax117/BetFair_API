@@ -105,6 +105,24 @@ sudo systemctl reload apache2
 
 Commit TypeScript/source fixes so they are not lost on the next clean build.
 
+### If the UI still shows `/api/api/*` 404s after redeploy
+
+1. **On the VPS, confirm the source has the fix** (no extra `/api` in paths):
+   ```bash
+   cd /opt/netbet
+   git log -1 --oneline risk-analytics-ui/web/src/api.ts
+   grep -n 'API_BASE.*leagues' risk-analytics-ui/web/src/api.ts
+   ```
+   You should see `${API_BASE}/leagues` (not `${API_BASE}/api/leagues`). If you still see `/api/leagues` in the grep, run `git pull` and ensure you're on `master` with the latest commit.
+
+2. **Rebuild the UI image from that directory (no cache)** and recreate the container:
+   ```bash
+   docker compose build --no-cache risk-analytics-ui-web
+   docker compose up -d --no-deps risk-analytics-ui-web
+   ```
+
+3. **In the browser:** Hard refresh so the new JS is loaded (e.g. Ctrl+Shift+R or DevTools → Network → "Disable cache" then refresh). The old bundle (`index-Bj5rbbWR.js`) is cached; the new build will have a different hash.
+
 ---
 
 ## Env vars (API / backend)
