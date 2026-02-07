@@ -42,6 +42,8 @@ def get_leagues(
     q: Optional[str] = Query(None, description="Search substring (event/team name)"),
     include_in_play: bool = Query(True, description="Include events that have already started (in-play)"),
     in_play_lookback_hours: float = Query(6.0, ge=0, le=168, description="When include_in_play, extend window back this many hours for in-play"),
+    limit: int = Query(100, ge=1, le=200, description="Max leagues to return"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
 ):
     """List leagues (competition_name) with event counts in the given time window."""
     now = datetime.now(timezone.utc)
@@ -70,8 +72,9 @@ def get_leagues(
                        OR e.away_runner_name ILIKE %s)
                 GROUP BY e.competition_name
                 ORDER BY e.competition_name
+                LIMIT %s OFFSET %s
                 """,
-                (from_effective, to_dt, search, search, search),
+                (from_effective, to_dt, search, search, search, limit, offset),
             )
         else:
             cur.execute(
@@ -85,8 +88,9 @@ def get_leagues(
                   AND e.event_open_date <= %s
                 GROUP BY e.competition_name
                 ORDER BY e.competition_name
+                LIMIT %s OFFSET %s
                 """,
-                (from_effective, to_dt),
+                (from_effective, to_dt, limit, offset),
             )
         rows = cur.fetchall()
     return [{"league": r["league"], "event_count": r["event_count"]} for r in rows]
@@ -99,6 +103,8 @@ def get_league_events(
     to_ts: Optional[str] = Query(None),
     include_in_play: bool = Query(True, description="Include in-play events"),
     in_play_lookback_hours: float = Query(6.0, ge=0, le=168),
+    limit: int = Query(100, ge=1, le=200, description="Max events to return"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
 ):
     """Events in the league with latest snapshot (odds + index + total_volume)."""
     league_decoded = unquote(league_name)
@@ -147,8 +153,9 @@ def get_league_events(
               AND e.event_open_date >= %s
               AND e.event_open_date <= %s
             ORDER BY e.event_open_date ASC
+            LIMIT %s OFFSET %s
             """,
-            (league_decoded, from_effective, to_dt),
+            (league_decoded, from_effective, to_dt, limit, offset),
         )
         rows = cur.fetchall()
 

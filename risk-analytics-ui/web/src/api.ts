@@ -58,13 +58,17 @@ export async function fetchLeagues(
   to: Date,
   q?: string,
   includeInPlay = true,
-  inPlayLookbackHours = 6
+  inPlayLookbackHours = 6,
+  limit = 100,
+  offset = 0
 ): Promise<LeagueItem[]> {
   const params = new URLSearchParams({
     from_ts: toISO(from),
     to_ts: toISO(to),
     include_in_play: String(includeInPlay),
     in_play_lookback_hours: String(inPlayLookbackHours),
+    limit: String(limit),
+    offset: String(offset),
   })
   if (q?.trim()) params.set('q', q.trim())
   const res = await fetch(`${API_BASE}/leagues?${params}`)
@@ -77,13 +81,17 @@ export async function fetchLeagueEvents(
   from: Date,
   to: Date,
   includeInPlay = true,
-  inPlayLookbackHours = 6
+  inPlayLookbackHours = 6,
+  limit = 100,
+  offset = 0
 ): Promise<EventItem[]> {
   const params = new URLSearchParams({
     from_ts: toISO(from),
     to_ts: toISO(to),
     include_in_play: String(includeInPlay),
     in_play_lookback_hours: String(inPlayLookbackHours),
+    limit: String(limit),
+    offset: String(offset),
   })
   const res = await fetch(
     `${API_BASE}/leagues/${encodeURIComponent(league)}/events?${params}`

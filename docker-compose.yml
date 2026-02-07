@@ -60,12 +60,85 @@ services:
       - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/${POSTGRES_DB:-netbet}
       - SPRING_DATASOURCE_USERNAME=${POSTGRES_USER:-netbet}
       - SPRING_DATASOURCE_PASSWORD=${POSTGRES_PASSWORD:-netbet}
-      - BETFAIR_POSTGRES_SINK_ENABLED=${BETFAIR_POSTGRES_SINK_ENABLED:true}
+      - BETFAIR_POSTGRES_SINK_ENABLED=${BETFAIR_POSTGRES_SINK_ENABLED:-true}
     volumes:
       - /opt/netbet/logs:/app/logs
     ports:
       - "8081:8081"
 
+  betfair-rest-client:
+    build:
+      context: ./betfair-rest-client
+    container_name: netbet-betfair-rest-client
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - ./auth-service/.env
+    environment:
+      - BF_CERT_PATH=/app/certs/client-2048.crt
+      - BF_KEY_PATH=/app/certs/client-2048.key
+      - BF_HEARTBEAT_ALIVE=/app/data/heartbeat_alive
+      - BF_HEARTBEAT_SUCCESS=/app/data/heartbeat_success
+      - BF_WINDOW_HOURS=24
+      - BF_LOOKBACK_MINUTES=60
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB:-netbet}
+      - POSTGRES_USER=${POSTGRES_USER:-netbet}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-netbet}
+    volumes:
+      - /opt/netbet/auth-service/certs:/app/certs:ro
+      - betfair-rest-client-data:/app/data
+    entrypoint: ["python", "-u", "main.py"]
+    mem_limit: 256M
+    cpus: 0.5
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /app/data/heartbeat_alive && test $$(($$(date +%s) - $$(stat -c %Y /app/data/heartbeat_alive 2>/dev/null || echo 0))) -lt 1200"]
+      interval: 2m
+      timeout: 10s
+      retries: 2
+      start_period: 5m
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
+        reservations:
+          memory: 64M
+          cpus: "0.25"
+
+  risk-analytics-ui-api:
+    build:
+      context: ./risk-analytics-ui/api
+      dockerfile: Dockerfile
+    container_name: risk-analytics-ui-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-netbet}
+      POSTGRES_USER: ${POSTGRES_USER:-netbet}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-netbet}
+    ports:
+      - "8000:8000"
+
+  risk-analytics-ui-web:
+    build:
+      context: ./risk-analytics-ui/web
+      dockerfile: Dockerfile
+    container_name: risk-analytics-ui-web
+    restart: unless-stopped
+    depends_on:
+      - risk-analytics-ui-api
+    ports:
+      - "3000:80"
+
 volumes:
   auth-data:
+  betfair-rest-client-data:
   pgdata:

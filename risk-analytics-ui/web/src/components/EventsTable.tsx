@@ -30,10 +30,12 @@ export function EventsTable({
   events,
   onSelectEvent,
   extremeThreshold,
+  showLimitNote = false,
 }: {
   events: EventItem[]
   onSelectEvent: (e: EventItem) => void
   extremeThreshold: number
+  showLimitNote?: boolean
 }) {
   const metaTooltip = (e: EventItem) =>
     `depth_limit: ${e.depth_limit ?? '—'}, calculation_version: ${e.calculation_version ?? '—'}`
@@ -49,6 +51,12 @@ export function EventsTable({
   }
 
   return (
+    <>
+    {showLimitNote && (
+      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+        Showing up to 100 events. Narrow your time range for more specific results.
+      </Typography>
+    )}
     <TableContainer component={Paper} variant="outlined">
       <Table size="small">
         <TableHead>
@@ -100,5 +108,6 @@ export function EventsTable({
         </TableBody>
       </Table>
     </TableContainer>
+    </>
   )
 }

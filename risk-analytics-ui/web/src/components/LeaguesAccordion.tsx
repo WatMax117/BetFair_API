@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import Accordion from '@mui/material/Accordion'
 import AccordionSummary from '@mui/material/AccordionSummary'
 import AccordionDetails from '@mui/material/AccordionDetails'
@@ -9,7 +9,7 @@ import Box from '@mui/material/Box'
 import FormControlLabel from '@mui/material/FormControlLabel'
 import Switch from '@mui/material/Switch'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
-import RefreshIcon from '@mui/icons-material/Refresh'
+import SearchIcon from '@mui/icons-material/Search'
 import { EventsTable } from './EventsTable'
 import { fetchLeagues, fetchLeagueEvents } from '../api'
 import type { LeagueItem, EventItem } from '../api'
@@ -25,22 +25,24 @@ function getWindowDates(hours: number): { from: Date; to: Date } {
   return { from, to }
 }
 
+const DEFAULT_LIMIT = 100
+
 export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventItem) => void }) {
   const [windowHours, setWindowHours] = useState(DEFAULT_WINDOW_HOURS)
   const [search, setSearch] = useState('')
-  const [searchApplied, setSearchApplied] = useState('')
+  const [searchApplied, setSearchApplied] = useState<string | null>(null)
   const [includeInPlay, setIncludeInPlay] = useState(true)
   const [inPlayLookbackHours, setInPlayLookbackHours] = useState(DEFAULT_IN_PLAY_LOOKBACK_HOURS)
   const [extremeThreshold, setExtremeThreshold] = useState(DEFAULT_EXTREME_INDEX_THRESHOLD)
   const [leagues, setLeagues] = useState<LeagueItem[]>([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [expandedLeague, setExpandedLeague] = useState<string | null>(null)
   const [eventsByLeague, setEventsByLeague] = useState<Record<string, EventItem[]>>({})
   const [loadingEvents, setLoadingEvents] = useState<Record<string, boolean>>({})
   const [refreshTrigger, setRefreshTrigger] = useState(0)
 
-  const { from, to } = getWindowDates(windowHours)
+  const { from, to } = useMemo(() => getWindowDates(windowHours), [windowHours])
 
   const loadLeagues = useCallback(async () => {
     setLoading(true)
@@ -49,9 +51,11 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
       const data = await fetchLeagues(
         from,
         to,
-        searchApplied || undefined,
+        searchApplied ?? undefined,
         includeInPlay,
-        inPlayLookbackHours
+        inPlayLookbackHours,
+        DEFAULT_LIMIT,
+        0
       )
       setLeagues(data)
     } catch (e) {
@@ -61,21 +65,33 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
     }
   }, [from.getTime(), to.getTime(), searchApplied, includeInPlay, inPlayLookbackHours, refreshTrigger])
 
-  useEffect(() => {
-    loadLeagues()
-  }, [loadLeagues])
+  const handleSearch = useCallback(() => {
+    setSearchApplied(search.trim() || '')
+    setLeagues([])
+    setEventsByLeague({})
+  }, [search])
 
-  const handleRefresh = () => {
-    setSearchApplied(search)
-    setRefreshTrigger((t) => t + 1)
-  }
+  const handleRefresh = useCallback(() => {
+    if (searchApplied !== null) {
+      setRefreshTrigger((t) => t + 1)
+    }
+  }, [searchApplied])
+
+  useEffect(() => {
+    if (searchApplied !== null) {
+      loadLeagues()
+    }
+  }, [searchApplied, loadLeagues])
+
+  const eventsByLeagueRef = useRef(eventsByLeague)
+  eventsByLeagueRef.current = eventsByLeague
 
   const handleAccordionChange = useCallback(
     (league: string) => (_: React.SyntheticEvent, isExpanded: boolean) => {
       setExpandedLeague(isExpanded ? league : null)
-      if (isExpanded && !eventsByLeague[league]) {
+      if (isExpanded && !eventsByLeagueRef.current[league]) {
         setLoadingEvents((prev) => ({ ...prev, [league]: true }))
-        fetchLeagueEvents(league, from, to, includeInPlay, inPlayLookbackHours)
+        fetchLeagueEvents(league, from, to, includeInPlay, inPlayLookbackHours, DEFAULT_LIMIT, 0)
           .then((events) => {
             setEventsByLeague((prev) => ({ ...prev, [league]: events }))
           })
@@ -85,7 +101,7 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
           })
       }
     },
-    [from, to, includeInPlay, inPlayLookbackHours, eventsByLeague]
+    [from, to, includeInPlay, inPlayLookbackHours]
   )
 
   return (
@@ -137,14 +153,20 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
         <TextField
           size="small"
           label="Search (team / event)"
+          placeholder="Enter term or leave blank"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && setSearchApplied(search)}
+          onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
           sx={{ width: 220 }}
         />
-        <Button variant="outlined" startIcon={<RefreshIcon />} onClick={handleRefresh}>
-          Refresh
+        <Button variant="contained" startIcon={<SearchIcon />} onClick={handleSearch}>
+          Search
         </Button>
+        {searchApplied !== null && (
+          <Button variant="outlined" onClick={handleRefresh} disabled={loading}>
+            Refresh
+          </Button>
+        )}
       </Box>
 
       {error && (
@@ -153,12 +175,22 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
         </Typography>
       )}
 
-      {loading ? (
+      {searchApplied === null ? (
+        <Typography color="text.secondary" sx={{ py: 3 }}>
+          Enter a search term (or leave blank) and click Search to load leagues. Data is lazy-loaded: events are fetched only when you expand a league. Max 100 results per request.
+        </Typography>
+      ) : loading ? (
         <Typography color="text.secondary">Loading leagues…</Typography>
       ) : leagues.length === 0 ? (
-        <Typography color="text.secondary">No leagues in the selected window.</Typography>
+        <Typography color="text.secondary">No leagues in the selected window. Try a different search or time range.</Typography>
       ) : (
-        leagues.map(({ league, event_count }) => (
+        <>
+        {leagues.length >= DEFAULT_LIMIT && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+            Showing up to {DEFAULT_LIMIT} leagues. Narrow your search for more specific results.
+          </Typography>
+        )}
+        {leagues.map(({ league, event_count }) => (
           <Accordion
             key={league}
             expanded={expandedLeague === league}
@@ -178,11 +210,13 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
                   events={eventsByLeague[league] || []}
                   onSelectEvent={onSelectEvent}
                   extremeThreshold={extremeThreshold}
+                  showLimitNote={(eventsByLeague[league]?.length ?? 0) >= DEFAULT_LIMIT}
                 />
               )}
             </AccordionDetails>
           </Accordion>
-        ))
+        ))}
+        </>
       )}
     </Box>
   )
