@@ -1,14 +1,16 @@
 """
-Market Imbalance Index (Risk Index) for Match Odds markets (Valeri.docx).
+Back-liquidity Imbalance Index for Match Odds markets (simplified V1).
 
+Snapshot-based visible-liquidity pressure only. No cumulative totalMatched in the index.
 Metadata-aware: uses runner_metadata mapping selectionId -> 'HOME' | 'AWAY' | 'DRAW'.
 Depth-limited: only first `depth_limit` levels of availableToBack (default 3).
 
-Formula:
-  Liability (L): sum of (size * (price - 1)) for target selection's Back offers (up to depth_limit).
-  Stakes (S): sum of totalMatched on other selections + availableToBack (current offers) on other selections (up to depth_limit).
-  Net Index: Risk = L - S.
-  total_volume: strictly from market_book.total_matched (market-level field) when provided.
+Formula (per runner):
+  L (liability) = sum of size * (price - 1) for that runner's first depth_limit back levels.
+  P (opposing pressure) = sum of size * (price - 1) for the OTHER two runners' first depth_limit back levels.
+  Imbalance = L - P.
+
+total_volume is returned for reporting only (market maturity); it is NOT used in the index.
 """
 
 import logging
@@ -62,18 +64,8 @@ def _liability(runner: Any, depth_limit: int) -> float:
     return total
 
 
-def _back_volume(runner: Any, depth_limit: int) -> float:
-    """Sum of sizes for first depth_limit levels of AvailableToBack."""
-    total = 0.0
-    atb = _get_atb(runner)
-    for level in atb[:depth_limit]:
-        _, size = _price_size(level)
-        total += size
-    return total
-
-
 def _total_matched(runner: Any) -> float:
-    """Runner-level totalMatched for stake calculation (explicit runner.total_matched)."""
+    """Runner-level totalMatched; used only for total_volume reporting, not for the index."""
     if isinstance(runner, dict):
         return _safe_float(runner.get("totalMatched") or runner.get("total_matched"))
     return _safe_float(getattr(runner, "total_matched", None) or getattr(runner, "totalMatched", None))
@@ -86,19 +78,17 @@ def calculate_risk(
     market_total_matched: Optional[float] = None,
 ) -> Optional[Tuple[float, float, float, float, Dict[str, float]]]:
     """
-    Compute Market Imbalance Index using selectionId -> role mapping. No list-order assumption.
+    Compute back-liquidity Imbalance Index (snapshot-only; no totalMatched in index).
 
     Args:
         runners: List of runner objects (dict or resource) from listMarketBook.
         runner_metadata: Map selectionId -> 'HOME' | 'AWAY' | 'DRAW'.
         depth_limit: Use only first N levels of availableToBack (default 3).
-        market_total_matched: If provided, use as total_volume (market_book.total_matched); else sum runner totalMatched.
+        market_total_matched: If provided, use as total_volume (reporting only); else sum runner totalMatched.
 
     Returns:
         (home_risk, away_risk, draw_risk, total_volume, risks_by_name) or None if not all three roles present.
-        total_volume = market_total_matched when provided, else sum of runner totalMatched.
-        Stakes use runner.total_matched explicitly.
-        risks_by_name: keys "home", "away", "draw" with risk values.
+        Risk values = L - P (liability minus opposing back-liquidity pressure). total_volume for reporting only.
     """
     # Build selection_id -> runner
     by_sid: Dict[Union[int, str], Any] = {}
@@ -108,7 +98,6 @@ def calculate_risk(
             by_sid[sid] = r
 
     required = {"HOME", "AWAY", "DRAW"}
-    # Resolve role -> runner (must have exactly one selection per role for valid market)
     role_to_runner: Dict[str, Any] = {}
     for sid_key, role in runner_metadata.items():
         role_upper = (role or "").upper()
@@ -120,7 +109,7 @@ def calculate_risk(
     if set(role_to_runner.keys()) != required:
         missing = required - set(role_to_runner.keys())
         logger.warning(
-            "Risk index skipped: missing selection(s) for role(s) %s (need HOME, AWAY, DRAW).",
+            "Imbalance index skipped: missing selection(s) for role(s) %s (need HOME, AWAY, DRAW).",
             missing,
         )
         return None
@@ -129,34 +118,20 @@ def calculate_risk(
     away_runner = role_to_runner["AWAY"]
     draw_runner = role_to_runner["DRAW"]
 
-    # Log once per market when any runner has missing or zero total_matched (per-selection volume from API)
-    for role_name, r in [("HOME", home_runner), ("AWAY", away_runner), ("DRAW", draw_runner)]:
-        sid = _sid(r)
-        tm = _total_matched(r)
-        if tm == 0.0:
-            logger.debug(
-                "Runner %s (role=%s) has missing or zero total_matched; per-selection volume may not be from API.",
-                sid, role_name,
-            )
-
-    # total_volume strictly from market_book.total_matched (market-level field) for consistency
+    # total_volume for reporting only (not used in index)
     if market_total_matched is not None:
         total_volume = _safe_float(market_total_matched)
     else:
-        logger.debug("market_total_matched not provided; using sum of runner totalMatched for total_volume.")
         total_volume = sum(_total_matched(r) for r in runners)
 
-    def stakes_for_target(target_runner: Any) -> float:
-        """S = totalMatched on other two + availableToBack (depth-limited) on other two."""
+    def opposing_pressure(target_runner: Any) -> float:
+        """P = sum of L (liability) from the other two runners (same units as L)."""
         others = [r for r in (home_runner, away_runner, draw_runner) if r is not target_runner]
-        s = 0.0
-        for r in others:
-            s += _total_matched(r) + _back_volume(r, depth_limit)
-        return s
+        return sum(_liability(r, depth_limit) for r in others)
 
-    home_risk = _liability(home_runner, depth_limit) - stakes_for_target(home_runner)
-    away_risk = _liability(away_runner, depth_limit) - stakes_for_target(away_runner)
-    draw_risk = _liability(draw_runner, depth_limit) - stakes_for_target(draw_runner)
+    home_risk = _liability(home_runner, depth_limit) - opposing_pressure(home_runner)
+    away_risk = _liability(away_runner, depth_limit) - opposing_pressure(away_runner)
+    draw_risk = _liability(draw_runner, depth_limit) - opposing_pressure(draw_runner)
 
     risks_by_name = {"home": home_risk, "away": away_risk, "draw": draw_risk}
     return home_risk, away_risk, draw_risk, total_volume, risks_by_name

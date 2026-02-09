@@ -31,7 +31,7 @@ TICK_DEADLINE_SECONDS = int(os.environ.get("BF_TICK_DEADLINE_SECONDS", "600"))  
 WINDOW_HOURS = float(os.environ.get("BF_WINDOW_HOURS", "24"))
 LOOKBACK_MINUTES = int(os.environ.get("BF_LOOKBACK_MINUTES", "60"))
 BACKOFF_BASE = [10, 30, 60]  # jitter 0.8–1.2 applied per delay
-MARKET_BOOK_TOP_N = int(os.environ.get("BF_MARKET_BOOK_TOP_N", "20"))
+MARKET_BOOK_TOP_N = int(os.environ.get("BF_MARKET_BOOK_TOP_N", "10"))
 DEPTH_LIMIT = int(os.environ.get("BF_DEPTH_LIMIT", "3"))
 SINGLE_SHOT = os.environ.get("BF_SINGLE_SHOT", "").lower() in ("1", "true", "yes")
 DEBUG_MARKET_SAMPLE_PATH = os.environ.get("DEBUG_MARKET_SAMPLE_PATH", "/opt/netbet/betfair-rest-client/debug_market_sample.json")
@@ -175,8 +175,8 @@ def _fetch_catalogue(trading, start_ts: float):
             "MARKET_START_TIME",
             "COMPETITION",
         ],
-        max_results=max(20, MARKET_BOOK_TOP_N),
-        sort="FIRST_TO_START",
+        max_results=max(200, MARKET_BOOK_TOP_N),
+        sort="MAXIMUM_TRADED",
     )
 
 
@@ -700,7 +700,7 @@ def _tick(trading) -> bool:
             draw_spread = _spread(best_prices.get("draw_best_back"), best_prices.get("draw_best_lay"))
             metrics = {
                 "home_risk": home_risk, "away_risk": away_risk, "draw_risk": draw_risk,
-                "total_volume": total_volume, "depth_limit": DEPTH_LIMIT, "calculation_version": "v1",
+                "total_volume": total_volume, "depth_limit": DEPTH_LIMIT, "calculation_version": "imbalance_v1",
                 **best_prices,
                 "home_spread": home_spread, "away_spread": away_spread, "draw_spread": draw_spread,
             }
@@ -713,14 +713,14 @@ def _tick(trading) -> bool:
     duration_ms = int((time.monotonic() - start_ts) * 1000)
     markets_count = len(risk_by_market)
 
-    # Log: tick_id, duration_ms, markets_count; then [Risk Index] per market
+    # Log: tick_id, duration_ms, markets_count; then [Imbalance] per market
     logger.info(
         "tick_id=%s duration_ms=%s markets_count=%s",
         tick_id, duration_ms, markets_count,
     )
     for mid, hr, ar, dr, vol in risk_by_market:
         logger.info(
-            "[Risk Index] Market: %s | H: %.2f | A: %.2f | D: %.2f | Vol: %.2f",
+            "[Imbalance] Market: %s | H: %.2f | A: %.2f | D: %.2f | Vol: %.2f",
             mid, hr, ar, dr, vol,
         )
 
@@ -851,7 +851,7 @@ def _run_single_shot(trading) -> bool:
                         draw_spread = _s(best_prices.get("draw_best_back"), best_prices.get("draw_best_lay"))
                         metrics = {
                             "home_risk": hr, "away_risk": ar, "draw_risk": dr, "total_volume": vol,
-                            "depth_limit": DEPTH_LIMIT, "calculation_version": "v1",
+                            "depth_limit": DEPTH_LIMIT, "calculation_version": "imbalance_v1",
                             **best_prices,
                             "home_spread": home_spread, "away_spread": away_spread, "draw_spread": draw_spread,
                         }
