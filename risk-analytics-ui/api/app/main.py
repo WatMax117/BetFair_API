@@ -742,6 +742,7 @@ def get_market_snapshots(
                 d.home_impedance, d.away_impedance, d.draw_impedance,
                 d.home_impedance_norm, d.away_impedance_norm, d.draw_impedance_norm,
                 d.home_book_risk_l3, d.away_book_risk_l3, d.draw_book_risk_l3,
+                d.home_best_back_size_l1, d.away_best_back_size_l1, d.draw_best_back_size_l1,
                 d.home_back_odds_l2, d.home_back_size_l2, d.home_back_odds_l3, d.home_back_size_l3,
                 d.away_back_odds_l2, d.away_back_size_l2, d.away_back_odds_l3, d.away_back_size_l3,
                 d.draw_back_odds_l2, d.draw_back_size_l2, d.draw_back_odds_l3, d.draw_back_size_l3,

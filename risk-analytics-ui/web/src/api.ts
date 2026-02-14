@@ -162,6 +162,9 @@ export type DebugSnapshotRow = {
   draw_back_size_l2?: number | null
   draw_back_odds_l3?: number | null
   draw_back_size_l3?: number | null
+  home_best_back_size_l1?: number | null
+  away_best_back_size_l1?: number | null
+  draw_best_back_size_l1?: number | null
   home_impedance?: number | null
   away_impedance?: number | null
   draw_impedance?: number | null

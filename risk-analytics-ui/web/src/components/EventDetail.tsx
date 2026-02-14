@@ -28,8 +28,8 @@ import {
   Legend,
   ResponsiveContainer,
 } from 'recharts'
-import { fetchEventMeta, fetchEventTimeseries, fetchEventLatestRaw } from '../api'
-import type { EventMeta, TimeseriesPoint } from '../api'
+import { fetchEventMeta, fetchEventTimeseries, fetchEventLatestRaw, fetchMarketSnapshots } from '../api'
+import type { EventMeta, TimeseriesPoint, DebugSnapshotRow } from '../api'
 
 const TIME_RANGES = [
   { label: '6h', hours: 6 },
@@ -96,8 +96,10 @@ export function EventDetail({
 }) {
   const [meta, setMeta] = useState<EventMeta | null>(null)
   const [timeseries, setTimeseries] = useState<TimeseriesPoint[]>([])
+  const [snapshots, setSnapshots] = useState<DebugSnapshotRow[]>([])
   const [loadingMeta, setLoadingMeta] = useState(true)
   const [loadingTs, setLoadingTs] = useState(true)
+  const [loadingSnapshots, setLoadingSnapshots] = useState(true)
   const [timeRangeHours, setTimeRangeHours] = useState(24)
   const [rawModalOpen, setRawModalOpen] = useState(false)
   const [rawPayload, setRawPayload] = useState<unknown>(null)
@@ -141,6 +143,18 @@ export function EventDetail({
     loadTimeseries()
   }, [loadTimeseries])
 
+  const loadSnapshots = useCallback(() => {
+    setLoadingSnapshots(true)
+    fetchMarketSnapshots(marketId, from, to, 200)
+      .then((data) => setSnapshots(data))
+      .catch(() => setSnapshots([]))
+      .finally(() => setLoadingSnapshots(false))
+  }, [marketId, from, to])
+
+  useEffect(() => {
+    loadSnapshots()
+  }, [loadSnapshots])
+
   const chartData = timeseries.map((p) => ({
     time: p.snapshot_at ? new Date(p.snapshot_at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '',
     fullTime: p.snapshot_at,
@@ -170,7 +184,8 @@ export function EventDetail({
   }, [includeImpedance, timeseries, hasImpedance])
 
   const latest = timeseries.length > 0 ? timeseries[timeseries.length - 1] : null
-  const last10 = timeseries.slice(-10).reverse()
+  /** Last 10 snapshots from Debug endpoint (per-snapshot rows with L2/L3). */
+  const last10 = snapshots.slice(0, 10)
   const homeSpread = latest ? spread(latest.home_best_back, latest.home_best_lay) : null
   const awaySpread = latest ? spread(latest.away_best_back, latest.away_best_lay) : null
   const drawSpread = latest ? spread(latest.draw_best_back, latest.draw_best_lay) : null
@@ -322,40 +337,10 @@ export function EventDetail({
             <Typography color="text.secondary">Loading time series…</Typography>
           ) : (
             <>
-              <Paper sx={{ p: 1, mb: 2, height: 280 }}>
-                <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>Best back odds</Typography>
-                <ResponsiveContainer width="100%" height={240}>
-                  <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="time" />
-                    <YAxis />
-                    <RechartsTooltip />
-                    <Legend />
-                    <Line type="monotone" dataKey="home_back" name="Home" stroke="#1976d2" dot={false} />
-                    <Line type="monotone" dataKey="away_back" name="Away" stroke="#9c27b0" dot={false} />
-                    <Line type="monotone" dataKey="draw_back" name="Draw" stroke="#2e7d32" dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </Paper>
-
-              <Paper sx={{ p: 1, mb: 2, height: 280 }}>
-                <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>Liquidity Imbalance Index</Typography>
-                <ResponsiveContainer width="100%" height={240}>
-                  <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="time" />
-                    <YAxis />
-                    <RechartsTooltip />
-                    <Legend />
-                    <Line type="monotone" dataKey="home_risk" name="Home" stroke="#1976d2" dot={false} />
-                    <Line type="monotone" dataKey="away_risk" name="Away" stroke="#9c27b0" dot={false} />
-                    <Line type="monotone" dataKey="draw_risk" name="Draw" stroke="#2e7d32" dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </Paper>
+              {/* Chart 1: Risk (Book Risk L3) */}
               {hasBookRiskL3 && (
                 <Paper sx={{ p: 1, mb: 2, height: 280 }}>
-                  <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>Book Risk L3 (H / A / D)</Typography>
+                  <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>Risk (Book Risk L3 H/A/D)</Typography>
                   <ResponsiveContainer width="100%" height={240}>
                     <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
                       <CartesianGrid strokeDasharray="3 3" />
@@ -370,11 +355,30 @@ export function EventDetail({
                   </ResponsiveContainer>
                 </Paper>
               )}
+
+              {/* Chart 2: Imbalance */}
+              <Paper sx={{ p: 1, mb: 2, height: 280 }}>
+                <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>Imbalance (H/A/D)</Typography>
+                <ResponsiveContainer width="100%" height={240}>
+                  <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis dataKey="time" />
+                    <YAxis />
+                    <RechartsTooltip />
+                    <Legend />
+                    <Line type="monotone" dataKey="home_risk" name="Home" stroke="#1976d2" dot={false} />
+                    <Line type="monotone" dataKey="away_risk" name="Away" stroke="#9c27b0" dot={false} />
+                    <Line type="monotone" dataKey="draw_risk" name="Draw" stroke="#2e7d32" dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </Paper>
+
+              {/* Chart 3: Impedance */}
               {includeImpedance && hasImpedance && (
                 <Paper sx={{ p: 1, mb: 2, height: 280 }}>
                   <Box sx={{ px: 1 }}>
                     <Tooltip title={IMPEDANCE_INDEX_TOOLTIP}>
-                      <Typography variant="caption" color="text.secondary" component="span">Impedance Index (H / A / D)</Typography>
+                      <Typography variant="caption" color="text.secondary" component="span">Impedance Index (H/A/D)</Typography>
                     </Tooltip>
                   </Box>
                   <ResponsiveContainer width="100%" height={240}>
@@ -391,20 +395,11 @@ export function EventDetail({
                   </ResponsiveContainer>
                 </Paper>
               )}
-              <Paper sx={{ p: 1, mb: 2, height: 220 }}>
-                <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>Total volume</Typography>
-                <ResponsiveContainer width="100%" height={180}>
-                  <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="time" />
-                    <YAxis />
-                    <RechartsTooltip />
-                    <Line type="monotone" dataKey="total_volume" name="Total volume" stroke="#ed6c02" dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </Paper>
 
               <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>Last 10 snapshots (copy-friendly)</Typography>
+              {loadingSnapshots ? (
+                <Typography color="text.secondary" sx={{ mb: 2 }}>Loading snapshots…</Typography>
+              ) : (
               <TableContainer component={Paper} variant="outlined" sx={{ mb: 2, userSelect: 'text' }}>
                 <Table size="small" stickyHeader>
                   <TableHead>
@@ -424,13 +419,13 @@ export function EventDetail({
                   </TableHead>
                   <TableBody>
                     {last10.map((p, i) => (
-                        <TableRow key={i}>
+                        <TableRow key={p.snapshot_id ?? i}>
                           <TableCell>{p.snapshot_at ? formatTime(p.snapshot_at) : '—'}</TableCell>
                           <TableCell align="left">
                             <HadCell
-                              home={p.home_best_back}
-                              away={p.away_best_back}
-                              draw={p.draw_best_back}
+                              home={p.home_best_back ?? null}
+                              away={p.away_best_back ?? null}
+                              draw={p.draw_best_back ?? null}
                             />
                           </TableCell>
                           <TableCell align="left">
@@ -476,21 +471,22 @@ export function EventDetail({
                             />
                           </TableCell>
                           <TableCell align="left">
-                            <HadCell home={p.home_risk} away={p.away_risk} draw={p.draw_risk} />
+                            <HadCell home={p.home_risk ?? null} away={p.away_risk ?? null} draw={p.draw_risk ?? null} />
                           </TableCell>
                           <TableCell align="left">
                             <HadCell
-                              home={p.impedance?.home ?? null}
-                              away={p.impedance?.away ?? null}
-                              draw={p.impedance?.draw ?? null}
+                              home={p.impedance?.home ?? p.home_impedance ?? null}
+                              away={p.impedance?.away ?? p.away_impedance ?? null}
+                              draw={p.impedance?.draw ?? p.draw_impedance ?? null}
                             />
                           </TableCell>
-                          <TableCell align="right">{num(p.total_volume)}</TableCell>
+                          <TableCell align="right">{num(p.total_volume ?? p.mdm_total_volume ?? null)}</TableCell>
                         </TableRow>
                     ))}
                   </TableBody>
                 </Table>
               </TableContainer>
+              )}
 
             </>
           )}
