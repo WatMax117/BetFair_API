@@ -194,30 +194,39 @@ def _fetch_market_books(trading, market_ids, start_ts: float):
 
 
 def _best_back_lay(runner: Any) -> tuple:
-    """First-level best back and best lay from runner.ex. Returns (best_back, best_lay); 0.0 if missing."""
+    """First-level best back and best lay from runner.ex. Returns (best_back, best_lay, best_back_size_l1, best_lay_size_l1); 0.0 if missing or invalid (price <= 1 or size <= 0)."""
     ex = runner.get("ex") if isinstance(runner, dict) else getattr(runner, "ex", None)
     if not ex:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0
     atb = ex.get("availableToBack") if isinstance(ex, dict) else getattr(ex, "availableToBack", None) or getattr(ex, "available_to_back", None)
     atl = ex.get("availableToLay") if isinstance(ex, dict) else getattr(ex, "availableToLay", None) or getattr(ex, "available_to_lay", None)
     best_back, best_lay = 0.0, 0.0
+    best_back_size_l1, best_lay_size_l1 = 0.0, 0.0
     if atb and len(atb) > 0:
         lev = atb[0]
         if isinstance(lev, (list, tuple)) and len(lev) >= 1:
             best_back = _safe_float(lev[0])
+            best_back_size_l1 = _safe_float(lev[1]) if len(lev) >= 2 else 0.0
         elif isinstance(lev, dict):
             best_back = _safe_float(lev.get("price") or lev.get("Price"))
+            best_back_size_l1 = _safe_float(lev.get("size") or lev.get("Size") or 0)
+        if best_back <= 1 or best_back_size_l1 <= 0:
+            best_back_size_l1 = 0.0
     if atl and len(atl) > 0:
         lev = atl[0]
         if isinstance(lev, (list, tuple)) and len(lev) >= 1:
             best_lay = _safe_float(lev[0])
+            best_lay_size_l1 = _safe_float(lev[1]) if len(lev) >= 2 else 0.0
         elif isinstance(lev, dict):
             best_lay = _safe_float(lev.get("price") or lev.get("Price"))
-    return best_back, best_lay
+            best_lay_size_l1 = _safe_float(lev.get("size") or lev.get("Size") or 0)
+        if best_lay <= 1 or best_lay_size_l1 <= 0:
+            best_lay_size_l1 = 0.0
+    return best_back, best_lay, best_back_size_l1, best_lay_size_l1
 
 
 def _runner_best_prices(runners: list, runner_metadata: Dict) -> Dict[str, float]:
-    """Build role -> best_back, best_lay from runners and metadata. Keys: home_best_back, away_best_back, draw_best_back, home_best_lay, away_best_lay, draw_best_lay."""
+    """Build role -> best_back, best_lay and L1 sizes from runners and metadata. Keys: home_best_back, away_best_back, ..., home_best_back_size_l1, ..., home_best_lay_size_l1, ..."""
     by_sid = {}
     for r in runners:
         sid = r.get("selectionId") if isinstance(r, dict) else getattr(r, "selectionId", None) or getattr(r, "selection_id", None)
@@ -231,9 +240,11 @@ def _runner_best_prices(runners: list, runner_metadata: Dict) -> Dict[str, float
         r = by_sid.get(sid_key)
         if not r:
             continue
-        best_back, best_lay = _best_back_lay(r)
+        best_back, best_lay, best_back_size_l1, best_lay_size_l1 = _best_back_lay(r)
         out[f"{role_lower}_best_back"] = best_back
         out[f"{role_lower}_best_lay"] = best_lay
+        out[f"{role_lower}_best_back_size_l1"] = best_back_size_l1
+        out[f"{role_lower}_best_lay_size_l1"] = best_lay_size_l1
     return out
 
 
@@ -387,6 +398,24 @@ def _ensure_three_layer_tables(conn):
             );
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_mdm_market_snapshot ON market_derived_metrics (market_id, snapshot_at);")
+        for col in (
+            "home_impedance", "away_impedance", "draw_impedance",
+            "home_impedance_norm", "away_impedance_norm", "draw_impedance_norm",
+            "home_book_risk_l3", "away_book_risk_l3", "draw_book_risk_l3",
+            "home_back_stake", "home_back_odds", "home_lay_stake", "home_lay_odds",
+            "away_back_stake", "away_back_odds", "away_lay_stake", "away_lay_odds",
+            "draw_back_stake", "draw_back_odds", "draw_lay_stake", "draw_lay_odds",
+            "home_best_back_size_l1", "away_best_back_size_l1", "draw_best_back_size_l1",
+            "home_best_lay_size_l1", "away_best_lay_size_l1", "draw_best_lay_size_l1",
+        ):
+            cur.execute(
+                """
+                DO $$ BEGIN
+                    ALTER TABLE market_derived_metrics ADD COLUMN """ + col + """ DOUBLE PRECISION NULL;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$;
+                """
+            )
     conn.commit()
 
 
@@ -478,7 +507,40 @@ def _insert_raw_snapshot(
 
 
 def _insert_derived_metrics(conn, snapshot_id: int, snapshot_at, market_id: str, metrics: Dict):
-    """Insert one row into market_derived_metrics (no raw_payload)."""
+    """Insert one row into market_derived_metrics (no raw_payload). Includes optional impedance and impedance-input columns."""
+    params = {
+        "snapshot_id": snapshot_id, "snapshot_at": snapshot_at, "market_id": market_id,
+        "home_risk": metrics["home_risk"], "away_risk": metrics["away_risk"],
+        "draw_risk": metrics["draw_risk"], "total_volume": metrics["total_volume"],
+        "home_best_back": metrics.get("home_best_back"), "away_best_back": metrics.get("away_best_back"),
+        "draw_best_back": metrics.get("draw_best_back"),
+        "home_best_lay": metrics.get("home_best_lay"), "away_best_lay": metrics.get("away_best_lay"),
+        "draw_best_lay": metrics.get("draw_best_lay"),
+        "home_spread": metrics.get("home_spread"), "away_spread": metrics.get("away_spread"),
+        "draw_spread": metrics.get("draw_spread"),
+        "depth_limit": metrics.get("depth_limit"),
+        "calculation_version": metrics.get("calculation_version", "v1"),
+        "home_impedance": metrics.get("home_impedance"), "away_impedance": metrics.get("away_impedance"),
+        "draw_impedance": metrics.get("draw_impedance"),
+        "home_impedance_norm": metrics.get("home_impedance_norm"),
+        "away_impedance_norm": metrics.get("away_impedance_norm"),
+        "draw_impedance_norm": metrics.get("draw_impedance_norm"),
+        "home_book_risk_l3": metrics.get("home_book_risk_l3"),
+        "away_book_risk_l3": metrics.get("away_book_risk_l3"),
+        "draw_book_risk_l3": metrics.get("draw_book_risk_l3"),
+        "home_back_stake": metrics.get("home_back_stake"), "home_back_odds": metrics.get("home_back_odds"),
+        "home_lay_stake": metrics.get("home_lay_stake"), "home_lay_odds": metrics.get("home_lay_odds"),
+        "away_back_stake": metrics.get("away_back_stake"), "away_back_odds": metrics.get("away_back_odds"),
+        "away_lay_stake": metrics.get("away_lay_stake"), "away_lay_odds": metrics.get("away_lay_odds"),
+        "draw_back_stake": metrics.get("draw_back_stake"), "draw_back_odds": metrics.get("draw_back_odds"),
+        "draw_lay_stake": metrics.get("draw_lay_stake"), "draw_lay_odds": metrics.get("draw_lay_odds"),
+        "home_best_back_size_l1": metrics.get("home_best_back_size_l1"),
+        "away_best_back_size_l1": metrics.get("away_best_back_size_l1"),
+        "draw_best_back_size_l1": metrics.get("draw_best_back_size_l1"),
+        "home_best_lay_size_l1": metrics.get("home_best_lay_size_l1"),
+        "away_best_lay_size_l1": metrics.get("away_best_lay_size_l1"),
+        "draw_best_lay_size_l1": metrics.get("draw_best_lay_size_l1"),
+    }
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -488,24 +550,34 @@ def _insert_derived_metrics(conn, snapshot_id: int, snapshot_at, market_id: str,
                 home_best_back, away_best_back, draw_best_back,
                 home_best_lay, away_best_lay, draw_best_lay,
                 home_spread, away_spread, draw_spread,
-                depth_limit, calculation_version
+                depth_limit, calculation_version,
+                home_impedance, away_impedance, draw_impedance,
+                home_impedance_norm, away_impedance_norm, draw_impedance_norm,
+                home_book_risk_l3, away_book_risk_l3, draw_book_risk_l3,
+                home_back_stake, home_back_odds, home_lay_stake, home_lay_odds,
+                away_back_stake, away_back_odds, away_lay_stake, away_lay_odds,
+                draw_back_stake, draw_back_odds, draw_lay_stake, draw_lay_odds,
+                home_best_back_size_l1, away_best_back_size_l1, draw_best_back_size_l1,
+                home_best_lay_size_l1, away_best_lay_size_l1, draw_best_lay_size_l1
             )
             VALUES (
-                %s, %s, %s,
-                %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s,
-                %s, %s, %s,
-                %s, %s
+                %(snapshot_id)s, %(snapshot_at)s, %(market_id)s,
+                %(home_risk)s, %(away_risk)s, %(draw_risk)s, %(total_volume)s,
+                %(home_best_back)s, %(away_best_back)s, %(draw_best_back)s,
+                %(home_best_lay)s, %(away_best_lay)s, %(draw_best_lay)s,
+                %(home_spread)s, %(away_spread)s, %(draw_spread)s,
+                %(depth_limit)s, %(calculation_version)s,
+                %(home_impedance)s, %(away_impedance)s, %(draw_impedance)s,
+                %(home_impedance_norm)s, %(away_impedance_norm)s, %(draw_impedance_norm)s,
+                %(home_book_risk_l3)s, %(away_book_risk_l3)s, %(draw_book_risk_l3)s,
+                %(home_back_stake)s, %(home_back_odds)s, %(home_lay_stake)s, %(home_lay_odds)s,
+                %(away_back_stake)s, %(away_back_odds)s, %(away_lay_stake)s, %(away_lay_odds)s,
+                %(draw_back_stake)s, %(draw_back_odds)s, %(draw_lay_stake)s, %(draw_lay_odds)s,
+                %(home_best_back_size_l1)s, %(away_best_back_size_l1)s, %(draw_best_back_size_l1)s,
+                %(home_best_lay_size_l1)s, %(away_best_lay_size_l1)s, %(draw_best_lay_size_l1)s
             )
             """,
-            (
-                snapshot_id, snapshot_at, market_id,
-                metrics["home_risk"], metrics["away_risk"], metrics["draw_risk"], metrics["total_volume"],
-                metrics.get("home_best_back"), metrics.get("away_best_back"), metrics.get("draw_best_back"),
-                metrics.get("home_best_lay"), metrics.get("away_best_lay"), metrics.get("draw_best_lay"),
-                metrics.get("home_spread"), metrics.get("away_spread"), metrics.get("draw_spread"),
-                metrics.get("depth_limit"), metrics.get("calculation_version", "v1"),
-            ),
+            params,
         )
     conn.commit()
 
@@ -651,7 +723,7 @@ def _tick(trading) -> bool:
         return False
 
     books = books_result if isinstance(books_result, list) else []
-    from risk import calculate_risk
+    from risk import calculate_risk, compute_impedance_index, compute_book_risk_l3
 
     risk_by_market = []
     try:
@@ -686,10 +758,61 @@ def _tick(trading) -> bool:
             )
             if snapshot_id is None:
                 continue
+
+            impedance_out = compute_impedance_index(runners, snapshot_ts=snapshot_at)
+            home_impedance = away_impedance = draw_impedance = None
+            home_impedance_norm = away_impedance_norm = draw_impedance_norm = None
+            home_back_stake = home_back_odds = home_lay_stake = home_lay_odds = None
+            away_back_stake = away_back_odds = away_lay_stake = away_lay_odds = None
+            draw_back_stake = draw_back_odds = draw_lay_stake = draw_lay_odds = None
+            if impedance_out and impedance_out.get("runners"):
+                for ro in impedance_out["runners"]:
+                    logger.info(
+                        "[Impedance] market=%s selectionId=%s impedance=%.2f normImpedance=%.4f backStake=%.2f backOdds=%.2f layStake=%.2f layOdds=%.2f",
+                        market_id,
+                        ro.get("selectionId"),
+                        ro.get("impedance", 0),
+                        ro.get("normImpedance", 0),
+                        ro.get("backStake", 0),
+                        ro.get("backOdds", 0),
+                        ro.get("layStake", 0),
+                        ro.get("layOdds", 0),
+                    )
+                for ro in impedance_out["runners"]:
+                    sid = ro.get("selectionId")
+                    role = (runner_metadata.get(sid) or "").strip().upper() if sid is not None else None
+                    if not role and sid is not None:
+                        try:
+                            role = (runner_metadata.get(int(sid)) or "").strip().upper()
+                        except (TypeError, ValueError):
+                            pass
+                    if role == "HOME":
+                        home_impedance = ro.get("impedance")
+                        home_impedance_norm = ro.get("normImpedance")
+                        home_back_stake = ro.get("backStake")
+                        home_back_odds = ro.get("backOdds")
+                        home_lay_stake = ro.get("layStake")
+                        home_lay_odds = ro.get("layOdds")
+                    elif role == "AWAY":
+                        away_impedance = ro.get("impedance")
+                        away_impedance_norm = ro.get("normImpedance")
+                        away_back_stake = ro.get("backStake")
+                        away_back_odds = ro.get("backOdds")
+                        away_lay_stake = ro.get("layStake")
+                        away_lay_odds = ro.get("layOdds")
+                    elif role == "DRAW":
+                        draw_impedance = ro.get("impedance")
+                        draw_impedance_norm = ro.get("normImpedance")
+                        draw_back_stake = ro.get("backStake")
+                        draw_back_odds = ro.get("backOdds")
+                        draw_lay_stake = ro.get("layStake")
+                        draw_lay_odds = ro.get("layOdds")
+
             result = calculate_risk(runners, runner_metadata, depth_limit=DEPTH_LIMIT, market_total_matched=total_matched)
             if result is None:
                 continue
             home_risk, away_risk, draw_risk, total_volume, _ = result
+            book_risk_l3 = compute_book_risk_l3(runners, runner_metadata, depth_limit=DEPTH_LIMIT)
             best_prices = _runner_best_prices(runners, runner_metadata)
             def _spread(back, lay):
                 if back is not None and lay is not None:
@@ -703,6 +826,14 @@ def _tick(trading) -> bool:
                 "total_volume": total_volume, "depth_limit": DEPTH_LIMIT, "calculation_version": "imbalance_v1",
                 **best_prices,
                 "home_spread": home_spread, "away_spread": away_spread, "draw_spread": draw_spread,
+                "home_impedance": home_impedance, "away_impedance": away_impedance, "draw_impedance": draw_impedance,
+                "home_impedance_norm": home_impedance_norm, "away_impedance_norm": away_impedance_norm, "draw_impedance_norm": draw_impedance_norm,
+                "home_book_risk_l3": (book_risk_l3 or {}).get("home_book_risk_l3"),
+                "away_book_risk_l3": (book_risk_l3 or {}).get("away_book_risk_l3"),
+                "draw_book_risk_l3": (book_risk_l3 or {}).get("draw_book_risk_l3"),
+                "home_back_stake": home_back_stake, "home_back_odds": home_back_odds, "home_lay_stake": home_lay_stake, "home_lay_odds": home_lay_odds,
+                "away_back_stake": away_back_stake, "away_back_odds": away_back_odds, "away_lay_stake": away_lay_stake, "away_lay_odds": away_lay_odds,
+                "draw_back_stake": draw_back_stake, "draw_back_odds": draw_back_odds, "draw_lay_stake": draw_lay_stake, "draw_lay_odds": draw_lay_odds,
             }
             _insert_derived_metrics(conn, snapshot_id, snapshot_at, market_id, metrics)
             risk_by_market.append((market_id, home_risk, away_risk, draw_risk, total_volume))

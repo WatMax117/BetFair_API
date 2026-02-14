@@ -10,12 +10,13 @@ Or from repo root:
 """
 import sys
 from pathlib import Path
+from datetime import datetime, timezone
 
 # Ensure risk module is importable when running from project root or betfair-rest-client
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
-from risk import calculate_risk
+from risk import calculate_risk, compute_impedance_index, compute_book_risk_l3
 
 
 def _runner(selection_id: int, total_matched: float, available_to_back: list) -> dict:
@@ -160,3 +161,232 @@ def test_golden_sample_real_world_json():
     assert result2 is not None
     _, _, _, vol2, _ = result2
     assert abs(vol2 - 9500.5) < 0.01
+
+
+# --- Impedance Index tests ---
+
+
+def _runner_ex(sid: int, available_to_back: list, available_to_lay: list) -> dict:
+    """Runner with ex.availableToBack and ex.availableToLay (Betfair listMarketBook shape)."""
+    return {
+        "selectionId": sid,
+        "ex": {"availableToBack": available_to_back, "availableToLay": available_to_lay},
+    }
+
+
+def test_impedance_no_liquidity_all_zero():
+    """No liquidity at all -> all impedance and normImpedance 0 (must not crash)."""
+    runners = [
+        _runner_ex(1, [], []),
+        _runner_ex(2, [], []),
+    ]
+    out = compute_impedance_index(runners, snapshot_ts="2025-01-01T00:00:00Z")
+    assert out["snapshot_ts"] == "2025-01-01T00:00:00Z"
+    assert len(out["runners"]) == 2
+    for ro in out["runners"]:
+        assert ro["impedance"] == 0.0
+        assert ro["normImpedance"] == 0.0
+        assert ro["backStake"] == 0.0
+        assert ro["layStake"] == 0.0
+
+
+def test_impedance_fewer_than_four_levels_uses_available():
+    """Fewer than 4 levels -> use available ones; must not crash."""
+    runners = [
+        _runner_ex(1, [[2.0, 100.0]], []),   # 1 back level
+        _runner_ex(2, [[3.0, 50.0], [3.1, 20.0]], []),
+    ]
+    out = compute_impedance_index(runners, snapshot_ts=None)
+    assert len(out["runners"]) == 2
+    r1 = next(r for r in out["runners"] if r["selectionId"] == 1)
+    r2 = next(r for r in out["runners"] if r["selectionId"] == 2)
+    assert r1["backStake"] == 100.0
+    assert r1["backOdds"] == 2.0
+    assert r2["backStake"] == 70.0
+    assert abs(r2["backOdds"] - (3.0 * 50 + 3.1 * 20) / 70) < 0.01
+
+
+def test_impedance_invalid_levels_ignored():
+    """Odds <= 1.0 or size <= 0 -> ignore (must not crash)."""
+    runners = [
+        _runner_ex(1, [[1.0, 100.0], [2.0, 0.0], [2.5, 50.0]], []),  # first two ignored
+        _runner_ex(2, [], []),
+    ]
+    out = compute_impedance_index(runners, snapshot_ts=None)
+    r1 = next(r for r in out["runners"] if r["selectionId"] == 1)
+    assert r1["backStake"] == 50.0
+    assert r1["backOdds"] == 2.5
+
+
+def test_impedance_synthetic_two_runner_hand_calc():
+    """
+    Hand-calc: Runner 1 back 100@2, Runner 2 back 50@3 (no lay).
+    If 1 wins: bookPnL = (0 - 100) + (50 - 0) = -50 -> Impedance(1) = 50.
+    If 2 wins: bookPnL = (0 - 100) + (100 - 0) = 0 -> Impedance(2) = 0.
+    """
+    runners = [
+        _runner_ex(1, [[2.0, 100.0]], []),
+        _runner_ex(2, [[3.0, 50.0]], []),
+    ]
+    out = compute_impedance_index(runners, snapshot_ts=None)
+    assert len(out["runners"]) == 2
+    imp_by_sid = {r["selectionId"]: r["impedance"] for r in out["runners"]}
+    assert abs(imp_by_sid[1] - 50.0) < 0.01, f"expected Impedance(1)=50 got {imp_by_sid[1]}"
+    assert abs(imp_by_sid[2] - 0.0) < 0.01, f"expected Impedance(2)=0 got {imp_by_sid[2]}"
+    scale = 100.0 + 50.0
+    r1 = next(r for r in out["runners"] if r["selectionId"] == 1)
+    assert abs(r1["normImpedance"] - 50.0 / scale) < 0.001
+
+
+def test_impedance_worst_case_runner_largest_positive():
+    """Worst-case runner (highest book loss if it wins) must have the largest positive Impedance."""
+    # Runner 1: large back stake -> if 1 wins book pays a lot (liability_back_1 large).
+    # Runner 2 and 3: small back stakes -> if 1 wins book wins little from others.
+    # So runner 1 should have the largest positive impedance.
+    runners = [
+        _runner_ex(1, [[2.0, 500.0]], []),   # liability_back = 500
+        _runner_ex(2, [[3.0, 10.0]], []),
+        _runner_ex(3, [[4.0, 10.0]], []),
+    ]
+    out = compute_impedance_index(runners, snapshot_ts=None)
+    impedances = [(r["selectionId"], r["impedance"]) for r in out["runners"]]
+    worst_sid = max(impedances, key=lambda x: x[1])[0]
+    assert worst_sid == 1, f"expected worst-case runner 1, got {impedances}"
+    assert all(r["impedance"] >= 0 or abs(r["impedance"]) < 0.01 for r in out["runners"] if r["selectionId"] == 1)
+
+
+def test_impedance_output_contract():
+    """Output has snapshot_ts and per-runner selectionId, impedance, normImpedance, backStake, backOdds, layStake, layOdds."""
+    runners = [
+        _runner_ex(10, [[2.0, 100.0]], [[2.02, 50.0]]),
+        _runner_ex(20, [[3.0, 30.0]], []),
+    ]
+    out = compute_impedance_index(runners, snapshot_ts="2025-06-15T12:00:00")
+    assert "snapshot_ts" in out
+    assert out["snapshot_ts"] == "2025-06-15T12:00:00"
+    assert "runners" in out
+    for ro in out["runners"]:
+        for key in ("selectionId", "impedance", "normImpedance", "backStake", "backOdds", "layStake", "layOdds"):
+            assert key in ro, f"missing key {key}"
+        assert isinstance(ro["impedance"], (int, float))
+        assert isinstance(ro["normImpedance"], (int, float))
+        assert isinstance(ro["backStake"], (int, float))
+        assert isinstance(ro["layStake"], (int, float))
+
+
+def test_impedance_timestamp_always_iso8601_string():
+    """snapshot_ts accepts datetime | str | None; output snapshot_ts is always an ISO-8601 string (or "")."""
+    runners = [_runner_ex(1, [[2.0, 10.0]], [])]
+    out_none = compute_impedance_index(runners, snapshot_ts=None)
+    assert out_none["snapshot_ts"] == ""
+    out_str = compute_impedance_index(runners, snapshot_ts="2025-02-10T14:30:00Z")
+    assert out_str["snapshot_ts"] == "2025-02-10T14:30:00Z"
+    dt = datetime(2025, 2, 10, 14, 30, 0, tzinfo=timezone.utc)
+    out_dt = compute_impedance_index(runners, snapshot_ts=dt)
+    assert out_dt["snapshot_ts"].startswith("2025-02-10") and "14:30" in out_dt["snapshot_ts"]
+
+
+def test_impedance_output_sorted_by_selection_id():
+    """Output runners are in stable order by selectionId (deterministic across snapshots/logs/tests)."""
+    runners = [
+        _runner_ex(300, [[2.0, 10.0]], []),
+        _runner_ex(100, [[3.0, 10.0]], []),
+        _runner_ex(200, [[4.0, 10.0]], []),
+    ]
+    out = compute_impedance_index(runners, snapshot_ts=None)
+    sids = [r["selectionId"] for r in out["runners"]]
+    assert sids == [100, 200, 300], f"expected [100,200,300] got {sids}"
+
+
+def test_impedance_back_and_lay_both_sides_synthetic():
+    """
+    Synthetic test with both BACK and LAY on two runners (full formula).
+    Runner 1: back 100@2, lay 50@2.02 -> liability_back=100, win_back=100, win_lay=51, payout_lay=50.
+    Runner 2: back 60@3, lay 40@3.1 -> liability_back=120, win_back=60, win_lay=84, payout_lay=40.
+    If 1 wins: bookPnL = (51-100) + (60-40) = -29 -> Impedance(1) = 29.
+    If 2 wins: bookPnL = (84-120) + (100-50) = 14 -> Impedance(2) = -14.
+    """
+    runners = [
+        _runner_ex(1, [[2.0, 100.0]], [[2.02, 50.0]]),
+        _runner_ex(2, [[3.0, 60.0]], [[3.1, 40.0]]),
+    ]
+    out = compute_impedance_index(runners, snapshot_ts=None)
+    assert len(out["runners"]) == 2
+    imp_by_sid = {r["selectionId"]: r["impedance"] for r in out["runners"]}
+    assert abs(imp_by_sid[1] - 29.0) < 0.01, f"expected Impedance(1)=29 got {imp_by_sid[1]}"
+    assert abs(imp_by_sid[2] - (-14.0)) < 0.01, f"expected Impedance(2)=-14 got {imp_by_sid[2]}"
+    r1 = next(r for r in out["runners"] if r["selectionId"] == 1)
+    r2 = next(r for r in out["runners"] if r["selectionId"] == 2)
+    assert r1["backStake"] == 100.0 and r1["layStake"] == 50.0
+    assert r2["backStake"] == 60.0 and r2["layStake"] == 40.0
+    scale = 100.0 + 50.0 + 60.0 + 40.0
+    assert abs(r1["normImpedance"] - 29.0 / scale) < 0.001
+    assert abs(r2["normImpedance"] - (-14.0) / scale) < 0.001
+
+
+def test_impedance_no_nan_or_inf():
+    """Output numerics must be finite (no NaN/Inf); rounding applied at boundary."""
+    runners = [
+        _runner_ex(1, [[2.0, 100.0]], []),
+        _runner_ex(2, [[3.0, 50.0]], []),
+    ]
+    out = compute_impedance_index(runners, snapshot_ts=None)
+    for ro in out["runners"]:
+        for key in ("impedance", "normImpedance", "backStake", "backOdds", "layStake", "layOdds"):
+            v = ro[key]
+            assert isinstance(v, (int, float)), f"{key} not numeric"
+            assert v == v, f"{key} is NaN"
+            assert abs(v) != float("inf"), f"{key} is Inf"
+
+
+# --- 3-way Book Risk L3 (Ajax–Olympiacos acceptance test) ---
+
+
+def test_book_risk_l3_ajax_olympiacos_example():
+    """
+    Acceptance test: Ajax–Olympiacos example from spec.
+    HOME (Ajax): (321, 2.96), (103, 2.98), (583, 3.00)
+    AWAY (Olympiacos): (813, 2.32), (1105, 2.34), (153, 2.36)
+    DRAW: (138, 3.85), (82, 3.90), (21, 3.95)
+    Expected: R[HOME]=-312.90, R[AWAY]=+1513.94, R[DRAW]=-2384.95
+    """
+    runners = [
+        _runner(1001, 0.0, [[2.96, 321.0], [2.98, 103.0], [3.00, 583.0]]),   # HOME
+        _runner(1002, 0.0, [[2.32, 813.0], [2.34, 1105.0], [2.36, 153.0]]),   # AWAY
+        _runner(1003, 0.0, [[3.85, 138.0], [3.90, 82.0], [3.95, 21.0]]),      # DRAW
+    ]
+    metadata = {1001: "HOME", 1002: "AWAY", 1003: "DRAW"}
+    out = compute_book_risk_l3(runners, metadata, depth_limit=3)
+    assert out is not None
+    assert abs(out["home_book_risk_l3"] - (-312.90)) < 0.02, f"R[HOME] expected -312.90 got {out['home_book_risk_l3']}"
+    assert abs(out["away_book_risk_l3"] - 1513.94) < 0.02, f"R[AWAY] expected 1513.94 got {out['away_book_risk_l3']}"
+    assert abs(out["draw_book_risk_l3"] - (-2384.95)) < 0.02, f"R[DRAW] expected -2384.95 got {out['draw_book_risk_l3']}"
+
+
+def test_book_risk_l3_fewer_than_three_levels_uses_available():
+    """If fewer than 3 levels exist, compute with available levels."""
+    runners = [
+        _runner(1, 0.0, [[2.0, 100.0]]),           # HOME: 1 level
+        _runner(2, 0.0, [[3.0, 50.0], [3.1, 50.0]]),  # AWAY: 2 levels
+        _runner(3, 0.0, []),                       # DRAW: 0 levels
+    ]
+    metadata = {1: "HOME", 2: "AWAY", 3: "DRAW"}
+    out = compute_book_risk_l3(runners, metadata, depth_limit=3)
+    assert out is not None
+    # W[HOME]=100*1=100, L[HOME]=50+50+0=100 -> R[HOME]=0
+    assert abs(out["home_book_risk_l3"] - 0.0) < 0.01
+    # W[AWAY]=50*2+50*2.1=205, L[AWAY]=100+0=100 -> R[AWAY]=105
+    assert abs(out["away_book_risk_l3"] - 105.0) < 0.02
+    # W[DRAW]=0, L[DRAW]=100+100=200 -> R[DRAW]=-200
+    assert abs(out["draw_book_risk_l3"] - (-200.0)) < 0.01
+
+
+def test_book_risk_l3_missing_role_returns_none():
+    """If HOME/AWAY/DRAW mapping is incomplete, returns None."""
+    runners = [
+        _runner(1, 0.0, [[2.0, 100.0]]),
+        _runner(2, 0.0, [[3.0, 50.0]]),
+    ]
+    metadata = {1: "HOME", 2: "AWAY"}  # no DRAW
+    out = compute_book_risk_l3(runners, metadata, depth_limit=3)
+    assert out is None

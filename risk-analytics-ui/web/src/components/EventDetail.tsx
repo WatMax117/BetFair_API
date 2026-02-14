@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
 import Typography from '@mui/material/Typography'
@@ -56,6 +56,53 @@ function spread(back: number | null, lay: number | null): number | null {
   return null
 }
 
+const STAKE_IMPEDANCE_TOOLTIP = 'VWAP/top-N (back+lay) modelled exposure; negative of modelled book P&L if the outcome wins.'
+const SIZE_IMPEDANCE_L1_TOOLTIP = 'Best-level (L1) only; back side. Noisy baseline vs Stake Impedance (VWAP/top-N).'
+
+/** Size Impedance Index (L1): L1_j = size_j*(odds_j-1), P1_j = Σ L1_k (k≠j), SizeImpedance_L1_j = L1_j − P1_j. Invalid odds/size → 0. Returns nulls when L1 sizes not in payload. */
+function computeSizeImpedanceL1(p: TimeseriesPoint): { home: number | null; away: number | null; draw: number | null } {
+  const sh = p.home_best_back_size_l1 ?? null
+  const sa = p.away_best_back_size_l1 ?? null
+  const sd = p.draw_best_back_size_l1 ?? null
+  if (sh == null && sa == null && sd == null) return { home: null, away: null, draw: null }
+  const o = (x: number | null) => (x != null && x > 1 ? x : 0)
+  const s = (x: number | null) => (x != null && x > 0 ? x : 0)
+  const oh = o(p.home_best_back)
+  const oa = o(p.away_best_back)
+  const od = o(p.draw_best_back)
+  const L1h = s(sh) * (oh - 1)
+  const L1a = s(sa) * (oa - 1)
+  const L1d = s(sd) * (od - 1)
+  return {
+    home: L1h - (L1a + L1d),
+    away: L1a - (L1h + L1d),
+    draw: L1d - (L1h + L1a),
+  }
+}
+
+/** Fixed width for H/A/D labels so letters align across all HadCell columns in the table */
+const HAD_LABEL_WIDTH = '1.25em'
+
+/** Renders H/A/D values vertically. H, A, D are alignment anchors (fixed-width); values align relative to the label. Order always H then A then D. */
+function HadCell({ home, away, draw }: { home: number | null; away: number | null; draw: number | null }) {
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.25, width: '100%' }}>
+      <Box sx={{ display: 'flex', flexDirection: 'row', alignItems: 'baseline' }}>
+        <Typography variant="body2" component="span" sx={{ minWidth: HAD_LABEL_WIDTH, textAlign: 'right' }}>H</Typography>
+        <Typography variant="body2" component="span" sx={{ ml: 0.5 }}>{num(home)}</Typography>
+      </Box>
+      <Box sx={{ display: 'flex', flexDirection: 'row', alignItems: 'baseline' }}>
+        <Typography variant="body2" component="span" sx={{ minWidth: HAD_LABEL_WIDTH, textAlign: 'right' }}>A</Typography>
+        <Typography variant="body2" component="span" sx={{ ml: 0.5 }}>{num(away)}</Typography>
+      </Box>
+      <Box sx={{ display: 'flex', flexDirection: 'row', alignItems: 'baseline' }}>
+        <Typography variant="body2" component="span" sx={{ minWidth: HAD_LABEL_WIDTH, textAlign: 'right' }}>D</Typography>
+        <Typography variant="body2" component="span" sx={{ ml: 0.5 }}>{num(draw)}</Typography>
+      </Box>
+    </Box>
+  )
+}
+
 export function EventDetail({
   marketId,
   eventName: _eventName,
@@ -77,9 +124,11 @@ export function EventDetail({
   const [rawModalOpen, setRawModalOpen] = useState(false)
   const [rawPayload, setRawPayload] = useState<unknown>(null)
   const [rawLoading, setRawLoading] = useState(false)
+  /** Impedance is always loaded and shown (no toggle). */
+  const includeImpedance = true
 
-  const from = new Date(Date.now() - timeRangeHours * 60 * 60 * 1000)
-  const to = new Date()
+  const from = useMemo(() => new Date(Date.now() - timeRangeHours * 60 * 60 * 1000), [timeRangeHours])
+  const to = useMemo(() => new Date(), [timeRangeHours])
 
   useEffect(() => {
     setLoadingMeta(true)
@@ -91,27 +140,62 @@ export function EventDetail({
 
   const loadTimeseries = useCallback(() => {
     setLoadingTs(true)
-    fetchEventTimeseries(marketId, from, to, 15)
-      .then(setTimeseries)
-      .catch(() => setTimeseries([]))
+    console.log('[EventDetail] Loading timeseries', { marketId, includeImpedance, from: from.toISOString(), to: to.toISOString() })
+    fetchEventTimeseries(marketId, from, to, 15, includeImpedance)
+      .then((data) => {
+        console.log('[EventDetail] Timeseries loaded', { 
+          count: data.length, 
+          hasImpedance: data.some(p => p.impedance),
+          sampleImpedance: data.find(p => p.impedance)?.impedance,
+          hasImpedanceInputs: data.some(p => p.impedanceInputs),
+          sampleImpedanceInputs: data.find(p => p.impedanceInputs)?.impedanceInputs
+        })
+        setTimeseries(data)
+      })
+      .catch((e) => {
+        console.error('[EventDetail] Timeseries load error', e)
+        setTimeseries([])
+      })
       .finally(() => setLoadingTs(false))
-  }, [marketId, from.getTime(), to.getTime()])
+  }, [marketId, from, to, includeImpedance])
 
   useEffect(() => {
     loadTimeseries()
   }, [loadTimeseries])
 
-  const chartData = timeseries.map((p) => ({
-    time: p.snapshot_at ? new Date(p.snapshot_at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '',
-    fullTime: p.snapshot_at,
-    home_back: p.home_best_back,
-    away_back: p.away_best_back,
-    draw_back: p.draw_best_back,
-    home_risk: p.home_risk,
-    away_risk: p.away_risk,
-    draw_risk: p.draw_risk,
-    total_volume: p.total_volume,
-  }))
+  const chartData = timeseries.map((p) => {
+    const sizeL1 = computeSizeImpedanceL1(p)
+    return {
+      time: p.snapshot_at ? new Date(p.snapshot_at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '',
+      fullTime: p.snapshot_at,
+      home_back: p.home_best_back ?? null,
+      away_back: p.away_best_back ?? null,
+      draw_back: p.draw_best_back ?? null,
+      home_risk: p.home_risk ?? null,
+      away_risk: p.away_risk ?? null,
+      draw_risk: p.draw_risk ?? null,
+      total_volume: p.total_volume ?? null,
+      home_impedance_raw: p.impedance?.home ?? null,
+      away_impedance_raw: p.impedance?.away ?? null,
+      draw_impedance_raw: p.impedance?.draw ?? null,
+      home_size_impedance_l1: sizeL1.home,
+      away_size_impedance_l1: sizeL1.away,
+      draw_size_impedance_l1: sizeL1.draw,
+    }
+  })
+  const hasImpedance = timeseries.some((p) => p.impedance && (p.impedance.home != null || p.impedance.away != null || p.impedance.draw != null))
+  const hasSizeImpedanceL1 = timeseries.some((p) => {
+    const s = computeSizeImpedanceL1(p)
+    return s.home != null || s.away != null || s.draw != null
+  })
+  useEffect(() => {
+    console.log('[EventDetail] Render state', { 
+      includeImpedance, 
+      timeseriesLength: timeseries.length, 
+      hasImpedance,
+      samplePoint: timeseries.find(p => p.impedance) 
+    })
+  }, [includeImpedance, timeseries, hasImpedance])
 
   const latest = timeseries.length > 0 ? timeseries[timeseries.length - 1] : null
   const last10 = timeseries.slice(-10).reverse()
@@ -127,11 +211,10 @@ export function EventDetail({
     setRawLoading(true)
     setRawPayload(null)
     fetchEventLatestRaw(marketId)
-      .then((r) => setRawPayload(r.raw_payload))
+      .then((r: { raw_payload: unknown }) => setRawPayload(r.raw_payload))
       .catch(() => setRawPayload(null))
       .finally(() => setRawLoading(false))
   }
-
   return (
     <Box>
       <Button startIcon={<ArrowBackIcon />} onClick={onBack} sx={{ mb: 2 }}>
@@ -150,7 +233,7 @@ export function EventDetail({
             <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
               market_id: {marketId}
             </Typography>
-            <Box sx={{ mt: 1, display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+            <Box sx={{ mt: 1, display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
               <Button size="small" startIcon={<ContentCopyIcon />} onClick={handleCopyMarketId}>
                 Copy market_id
               </Button>
@@ -175,9 +258,56 @@ export function EventDetail({
                   </Box>
                 </Tooltip>
                 <Box>
-                  <Typography variant="caption" color="text.secondary">Index</Typography>
+                  <Typography variant="caption" color="text.secondary">Imbalance index (H / A / D)</Typography>
                   <Typography>H {num(latest.home_risk)} / A {num(latest.away_risk)} / D {num(latest.draw_risk)}</Typography>
                 </Box>
+                {includeImpedance && latest.impedance && (latest.impedance.home != null || latest.impedance.away != null || latest.impedance.draw != null) && (
+                  <Tooltip title={STAKE_IMPEDANCE_TOOLTIP}>
+                    <Box>
+                      <Typography variant="caption" color="text.secondary">Stake Impedance Index (H / A / D)</Typography>
+                      <Typography>H {num(latest.impedance.home)} / A {num(latest.impedance.away)} / D {num(latest.impedance.draw)}</Typography>
+                    </Box>
+                  </Tooltip>
+                )}
+                {includeImpedance && latest.impedanceInputs && (
+                  <>
+                    <Box>
+                      <Typography variant="caption" color="text.secondary">Back stake (H / A / D)</Typography>
+                      <Typography>H {num(latest.impedanceInputs.home?.backStake)} / A {num(latest.impedanceInputs.away?.backStake)} / D {num(latest.impedanceInputs.draw?.backStake)}</Typography>
+                    </Box>
+                    <Box>
+                      <Typography variant="caption" color="text.secondary">Back odds (H / A / D)</Typography>
+                      <Typography>H {num(latest.impedanceInputs.home?.backOdds)} / A {num(latest.impedanceInputs.away?.backOdds)} / D {num(latest.impedanceInputs.draw?.backOdds)}</Typography>
+                    </Box>
+                    <Box>
+                      <Typography variant="caption" color="text.secondary">Back profit (H / A / D)</Typography>
+                      <Typography>H {num(latest.impedanceInputs.home?.backProfit)} / A {num(latest.impedanceInputs.away?.backProfit)} / D {num(latest.impedanceInputs.draw?.backProfit)}</Typography>
+                    </Box>
+                    <Box>
+                      <Typography variant="caption" color="text.secondary">Lay stake (H / A / D)</Typography>
+                      <Typography>H {num(latest.impedanceInputs.home?.layStake)} / A {num(latest.impedanceInputs.away?.layStake)} / D {num(latest.impedanceInputs.draw?.layStake)}</Typography>
+                    </Box>
+                    <Box>
+                      <Typography variant="caption" color="text.secondary">Lay odds (H / A / D)</Typography>
+                      <Typography>H {num(latest.impedanceInputs.home?.layOdds)} / A {num(latest.impedanceInputs.away?.layOdds)} / D {num(latest.impedanceInputs.draw?.layOdds)}</Typography>
+                    </Box>
+                    <Box>
+                      <Typography variant="caption" color="text.secondary">Lay liability (H / A / D)</Typography>
+                      <Typography>H {num(latest.impedanceInputs.home?.layLiability)} / A {num(latest.impedanceInputs.away?.layLiability)} / D {num(latest.impedanceInputs.draw?.layLiability)}</Typography>
+                    </Box>
+                    {(() => {
+                      const totalBack = (latest.impedanceInputs.home?.backStake ?? 0) + (latest.impedanceInputs.away?.backStake ?? 0) + (latest.impedanceInputs.draw?.backStake ?? 0)
+                      const totalLay = (latest.impedanceInputs.home?.layStake ?? 0) + (latest.impedanceInputs.away?.layStake ?? 0) + (latest.impedanceInputs.draw?.layStake ?? 0)
+                      const scale = totalBack + totalLay
+                      return (
+                        <Box>
+                          <Typography variant="caption" color="text.secondary">Total scale</Typography>
+                          <Typography>back: {num(totalBack)} / lay: {num(totalLay)} / scale: {num(scale)}</Typography>
+                        </Box>
+                      )
+                    })()}
+                  </>
+                )}
                 <Box>
                   <Typography variant="caption" color="text.secondary">Total volume</Typography>
                   <Typography>{num(latest.total_volume)}</Typography>
@@ -251,6 +381,68 @@ export function EventDetail({
                   </LineChart>
                 </ResponsiveContainer>
               </Paper>
+              {includeImpedance && hasImpedance && (
+                <>
+                  <Paper sx={{ p: 1, mb: 2, height: 280 }}>
+                    <Box sx={{ px: 1 }}>
+                      <Tooltip title={STAKE_IMPEDANCE_TOOLTIP}>
+                        <Typography variant="caption" color="text.secondary" component="span">Stake Impedance Index (H / A / D)</Typography>
+                      </Tooltip>
+                    </Box>
+                    <ResponsiveContainer width="100%" height={240}>
+                      <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="time" />
+                        <YAxis />
+                        <RechartsTooltip />
+                        <Legend />
+                        <Line type="monotone" dataKey="home_impedance_raw" name="Home" stroke="#1976d2" dot={false} />
+                        <Line type="monotone" dataKey="away_impedance_raw" name="Away" stroke="#9c27b0" dot={false} />
+                        <Line type="monotone" dataKey="draw_impedance_raw" name="Draw" stroke="#2e7d32" dot={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </Paper>
+                  {hasSizeImpedanceL1 && (
+                    <Paper sx={{ p: 1, mb: 2, height: 280 }}>
+                      <Box sx={{ px: 1 }}>
+                        <Tooltip title={SIZE_IMPEDANCE_L1_TOOLTIP}>
+                          <Typography variant="caption" color="text.secondary" component="span">Size Impedance Index (L1) (H / A / D)</Typography>
+                        </Tooltip>
+                      </Box>
+                      <ResponsiveContainer width="100%" height={240}>
+                        <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="time" />
+                          <YAxis />
+                          <RechartsTooltip />
+                          <Legend />
+                          <Line type="monotone" dataKey="home_size_impedance_l1" name="Home" stroke="#1976d2" dot={false} />
+                          <Line type="monotone" dataKey="away_size_impedance_l1" name="Away" stroke="#9c27b0" dot={false} />
+                          <Line type="monotone" dataKey="draw_size_impedance_l1" name="Draw" stroke="#2e7d32" dot={false} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </Paper>
+                  )}
+                  {/* Placeholder for future delta view */}
+                  {/* <Paper sx={{ p: 1, mb: 2, height: 280 }}>
+                    <Box sx={{ px: 1 }}>
+                      <Typography variant="caption" color="text.secondary" component="span">Δ Stake Impedance vs previous snapshot</Typography>
+                    </Box>
+                    <ResponsiveContainer width="100%" height={240}>
+                      <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                        <CartesianGrid strokeDasharray="3 3" />
+                        <XAxis dataKey="time" />
+                        <YAxis />
+                        <RechartsTooltip />
+                        <Legend />
+                        <Line type="monotone" dataKey="home_impedance_delta" name="Home Δ" stroke="#1976d2" dot={false} />
+                        <Line type="monotone" dataKey="away_impedance_delta" name="Away Δ" stroke="#9c27b0" dot={false} />
+                        <Line type="monotone" dataKey="draw_impedance_delta" name="Draw Δ" stroke="#2e7d32" dot={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </Paper> */}
+                </>
+              )}
 
               <Paper sx={{ p: 1, mb: 2, height: 220 }}>
                 <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>Total volume</Typography>
@@ -271,31 +463,87 @@ export function EventDetail({
                   <TableHead>
                     <TableRow>
                       <TableCell>snapshot_at</TableCell>
-                      <TableCell align="right">back H</TableCell>
-                      <TableCell align="right">back A</TableCell>
-                      <TableCell align="right">back D</TableCell>
-                      <TableCell align="right">index H</TableCell>
-                      <TableCell align="right">index A</TableCell>
-                      <TableCell align="right">index D</TableCell>
+                      <TableCell align="left" title="L1 best back odds">backOdds (L1)</TableCell>
+                      <TableCell align="left" title="Best back size (L1 only)">backSize (L1)</TableCell>
+                      <TableCell align="left" title="Best lay size (L1 only)">laySize (L1)</TableCell>
+                      <TableCell align="left" title="Back stake (top-N VWAP)">backStake (top-N VWAP)</TableCell>
+                      <TableCell align="left" title="Lay stake (top-N VWAP)">layStake (top-N VWAP)</TableCell>
+                      <TableCell align="left" title="3-way book exposure at top 3 back levels. R[o]=W[o]-L[o]; &gt;0 = book loses if outcome wins.">Book Risk L3 (H/A/D)</TableCell>
+                      <TableCell align="left">Imbalance</TableCell>
+                      <TableCell align="left" title={SIZE_IMPEDANCE_L1_TOOLTIP}>Size Impedance Index (L1)</TableCell>
+                      <TableCell align="left" title={STAKE_IMPEDANCE_TOOLTIP}>Stake Impedance Index</TableCell>
                       <TableCell align="right">total_volume</TableCell>
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {last10.map((p, i) => (
-                      <TableRow key={i}>
-                        <TableCell>{p.snapshot_at ? formatTime(p.snapshot_at) : '—'}</TableCell>
-                        <TableCell align="right">{num(p.home_best_back)}</TableCell>
-                        <TableCell align="right">{num(p.away_best_back)}</TableCell>
-                        <TableCell align="right">{num(p.draw_best_back)}</TableCell>
-                        <TableCell align="right">{num(p.home_risk)}</TableCell>
-                        <TableCell align="right">{num(p.away_risk)}</TableCell>
-                        <TableCell align="right">{num(p.draw_risk)}</TableCell>
-                        <TableCell align="right">{num(p.total_volume)}</TableCell>
-                      </TableRow>
-                    ))}
+                    {last10.map((p, i) => {
+                      const sizeL1 = computeSizeImpedanceL1(p)
+                      return (
+                        <TableRow key={i}>
+                          <TableCell>{p.snapshot_at ? formatTime(p.snapshot_at) : '—'}</TableCell>
+                          <TableCell align="left">
+                            <HadCell
+                              home={p.home_best_back}
+                              away={p.away_best_back}
+                              draw={p.draw_best_back}
+                            />
+                          </TableCell>
+                          <TableCell align="left">
+                            <HadCell
+                              home={p.home_best_back_size_l1 ?? null}
+                              away={p.away_best_back_size_l1 ?? null}
+                              draw={p.draw_best_back_size_l1 ?? null}
+                            />
+                          </TableCell>
+                          <TableCell align="left">
+                            <HadCell
+                              home={p.home_best_lay_size_l1 ?? null}
+                              away={p.away_best_lay_size_l1 ?? null}
+                              draw={p.draw_best_lay_size_l1 ?? null}
+                            />
+                          </TableCell>
+                          <TableCell align="left">
+                            <HadCell
+                              home={p.impedanceInputs?.home?.backStake ?? null}
+                              away={p.impedanceInputs?.away?.backStake ?? null}
+                              draw={p.impedanceInputs?.draw?.backStake ?? null}
+                            />
+                          </TableCell>
+                          <TableCell align="left">
+                            <HadCell
+                              home={p.impedanceInputs?.home?.layStake ?? null}
+                              away={p.impedanceInputs?.away?.layStake ?? null}
+                              draw={p.impedanceInputs?.draw?.layStake ?? null}
+                            />
+                          </TableCell>
+                          <TableCell align="left">
+                            <HadCell
+                              home={p.home_book_risk_l3 ?? null}
+                              away={p.away_book_risk_l3 ?? null}
+                              draw={p.draw_book_risk_l3 ?? null}
+                            />
+                          </TableCell>
+                          <TableCell align="left">
+                            <HadCell home={p.home_risk} away={p.away_risk} draw={p.draw_risk} />
+                          </TableCell>
+                          <TableCell align="left">
+                            <HadCell home={sizeL1.home} away={sizeL1.away} draw={sizeL1.draw} />
+                          </TableCell>
+                          <TableCell align="left">
+                            <HadCell
+                              home={p.impedance?.home ?? null}
+                              away={p.impedance?.away ?? null}
+                              draw={p.impedance?.draw ?? null}
+                            />
+                          </TableCell>
+                          <TableCell align="right">{num(p.total_volume)}</TableCell>
+                        </TableRow>
+                      )
+                    })}
                   </TableBody>
                 </Table>
               </TableContainer>
+
             </>
           )}
 
@@ -303,6 +551,7 @@ export function EventDetail({
             <Typography variant="caption" color="text.secondary" display="block">Data notes</Typography>
             <Typography variant="body2">
               Snapshot interval: 15 minutes. total_volume is market-level totalMatched; per-runner matched volume may be unavailable via REST.
+              backSize (L1) / laySize (L1) are best-level sizes; Size Impedance Index (L1) is computed from L1 back sizes when provided.
             </Typography>
             {latest && timeseries.length > 0 && (
               <Typography variant="body2" sx={{ mt: 0.5 }}>
