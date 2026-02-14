@@ -7,7 +7,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py risk.py .
+COPY main.py risk.py backfill_impedance.py backfill_tier_a.py backfill_book_risk_l3.py .
 
 # Cert paths in container (mapped via volume); config from env_file in compose
 ENV BF_CERT_PATH=/app/certs/client-2048.crt

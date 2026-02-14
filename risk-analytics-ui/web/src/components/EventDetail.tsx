@@ -56,29 +56,7 @@ function spread(back: number | null, lay: number | null): number | null {
   return null
 }
 
-const STAKE_IMPEDANCE_TOOLTIP = 'VWAP/top-N (back+lay) modelled exposure; negative of modelled book P&L if the outcome wins.'
-const SIZE_IMPEDANCE_L1_TOOLTIP = 'Best-level (L1) only; back side. Noisy baseline vs Stake Impedance (VWAP/top-N).'
-
-/** Size Impedance Index (L1): L1_j = size_j*(odds_j-1), P1_j = Σ L1_k (k≠j), SizeImpedance_L1_j = L1_j − P1_j. Invalid odds/size → 0. Returns nulls when L1 sizes not in payload. */
-function computeSizeImpedanceL1(p: TimeseriesPoint): { home: number | null; away: number | null; draw: number | null } {
-  const sh = p.home_best_back_size_l1 ?? null
-  const sa = p.away_best_back_size_l1 ?? null
-  const sd = p.draw_best_back_size_l1 ?? null
-  if (sh == null && sa == null && sd == null) return { home: null, away: null, draw: null }
-  const o = (x: number | null) => (x != null && x > 1 ? x : 0)
-  const s = (x: number | null) => (x != null && x > 0 ? x : 0)
-  const oh = o(p.home_best_back)
-  const oa = o(p.away_best_back)
-  const od = o(p.draw_best_back)
-  const L1h = s(sh) * (oh - 1)
-  const L1a = s(sa) * (oa - 1)
-  const L1d = s(sd) * (od - 1)
-  return {
-    home: L1h - (L1a + L1d),
-    away: L1a - (L1h + L1d),
-    draw: L1d - (L1h + L1a),
-  }
-}
+const IMPEDANCE_INDEX_TOOLTIP = 'VWAP/top-N (back+lay) modelled exposure; negative of modelled book P&L if the outcome wins.'
 
 /** Fixed width for H/A/D labels so letters align across all HadCell columns in the table */
 const HAD_LABEL_WIDTH = '1.25em'
@@ -163,31 +141,25 @@ export function EventDetail({
     loadTimeseries()
   }, [loadTimeseries])
 
-  const chartData = timeseries.map((p) => {
-    const sizeL1 = computeSizeImpedanceL1(p)
-    return {
-      time: p.snapshot_at ? new Date(p.snapshot_at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '',
-      fullTime: p.snapshot_at,
-      home_back: p.home_best_back ?? null,
-      away_back: p.away_best_back ?? null,
-      draw_back: p.draw_best_back ?? null,
-      home_risk: p.home_risk ?? null,
-      away_risk: p.away_risk ?? null,
-      draw_risk: p.draw_risk ?? null,
-      total_volume: p.total_volume ?? null,
-      home_impedance_raw: p.impedance?.home ?? null,
-      away_impedance_raw: p.impedance?.away ?? null,
-      draw_impedance_raw: p.impedance?.draw ?? null,
-      home_size_impedance_l1: sizeL1.home,
-      away_size_impedance_l1: sizeL1.away,
-      draw_size_impedance_l1: sizeL1.draw,
-    }
-  })
+  const chartData = timeseries.map((p) => ({
+    time: p.snapshot_at ? new Date(p.snapshot_at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '',
+    fullTime: p.snapshot_at,
+    home_back: p.home_best_back ?? null,
+    away_back: p.away_best_back ?? null,
+    draw_back: p.draw_best_back ?? null,
+    home_risk: p.home_risk ?? null,
+    away_risk: p.away_risk ?? null,
+    draw_risk: p.draw_risk ?? null,
+    total_volume: p.total_volume ?? null,
+    home_book_risk_l3: p.home_book_risk_l3 ?? null,
+    away_book_risk_l3: p.away_book_risk_l3 ?? null,
+    draw_book_risk_l3: p.draw_book_risk_l3 ?? null,
+    home_impedance_raw: p.impedance?.home ?? null,
+    away_impedance_raw: p.impedance?.away ?? null,
+    draw_impedance_raw: p.impedance?.draw ?? null,
+  }))
   const hasImpedance = timeseries.some((p) => p.impedance && (p.impedance.home != null || p.impedance.away != null || p.impedance.draw != null))
-  const hasSizeImpedanceL1 = timeseries.some((p) => {
-    const s = computeSizeImpedanceL1(p)
-    return s.home != null || s.away != null || s.draw != null
-  })
+  const hasBookRiskL3 = timeseries.some((p) => p.home_book_risk_l3 != null || p.away_book_risk_l3 != null || p.draw_book_risk_l3 != null)
   useEffect(() => {
     console.log('[EventDetail] Render state', { 
       includeImpedance, 
@@ -262,9 +234,9 @@ export function EventDetail({
                   <Typography>H {num(latest.home_risk)} / A {num(latest.away_risk)} / D {num(latest.draw_risk)}</Typography>
                 </Box>
                 {includeImpedance && latest.impedance && (latest.impedance.home != null || latest.impedance.away != null || latest.impedance.draw != null) && (
-                  <Tooltip title={STAKE_IMPEDANCE_TOOLTIP}>
+                  <Tooltip title={IMPEDANCE_INDEX_TOOLTIP}>
                     <Box>
-                      <Typography variant="caption" color="text.secondary">Stake Impedance Index (H / A / D)</Typography>
+                      <Typography variant="caption" color="text.secondary">Impedance Index (H / A / D)</Typography>
                       <Typography>H {num(latest.impedance.home)} / A {num(latest.impedance.away)} / D {num(latest.impedance.draw)}</Typography>
                     </Box>
                   </Tooltip>
@@ -381,69 +353,44 @@ export function EventDetail({
                   </LineChart>
                 </ResponsiveContainer>
               </Paper>
-              {includeImpedance && hasImpedance && (
-                <>
-                  <Paper sx={{ p: 1, mb: 2, height: 280 }}>
-                    <Box sx={{ px: 1 }}>
-                      <Tooltip title={STAKE_IMPEDANCE_TOOLTIP}>
-                        <Typography variant="caption" color="text.secondary" component="span">Stake Impedance Index (H / A / D)</Typography>
-                      </Tooltip>
-                    </Box>
-                    <ResponsiveContainer width="100%" height={240}>
-                      <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="time" />
-                        <YAxis />
-                        <RechartsTooltip />
-                        <Legend />
-                        <Line type="monotone" dataKey="home_impedance_raw" name="Home" stroke="#1976d2" dot={false} />
-                        <Line type="monotone" dataKey="away_impedance_raw" name="Away" stroke="#9c27b0" dot={false} />
-                        <Line type="monotone" dataKey="draw_impedance_raw" name="Draw" stroke="#2e7d32" dot={false} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </Paper>
-                  {hasSizeImpedanceL1 && (
-                    <Paper sx={{ p: 1, mb: 2, height: 280 }}>
-                      <Box sx={{ px: 1 }}>
-                        <Tooltip title={SIZE_IMPEDANCE_L1_TOOLTIP}>
-                          <Typography variant="caption" color="text.secondary" component="span">Size Impedance Index (L1) (H / A / D)</Typography>
-                        </Tooltip>
-                      </Box>
-                      <ResponsiveContainer width="100%" height={240}>
-                        <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-                          <CartesianGrid strokeDasharray="3 3" />
-                          <XAxis dataKey="time" />
-                          <YAxis />
-                          <RechartsTooltip />
-                          <Legend />
-                          <Line type="monotone" dataKey="home_size_impedance_l1" name="Home" stroke="#1976d2" dot={false} />
-                          <Line type="monotone" dataKey="away_size_impedance_l1" name="Away" stroke="#9c27b0" dot={false} />
-                          <Line type="monotone" dataKey="draw_size_impedance_l1" name="Draw" stroke="#2e7d32" dot={false} />
-                        </LineChart>
-                      </ResponsiveContainer>
-                    </Paper>
-                  )}
-                  {/* Placeholder for future delta view */}
-                  {/* <Paper sx={{ p: 1, mb: 2, height: 280 }}>
-                    <Box sx={{ px: 1 }}>
-                      <Typography variant="caption" color="text.secondary" component="span">Δ Stake Impedance vs previous snapshot</Typography>
-                    </Box>
-                    <ResponsiveContainer width="100%" height={240}>
-                      <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-                        <CartesianGrid strokeDasharray="3 3" />
-                        <XAxis dataKey="time" />
-                        <YAxis />
-                        <RechartsTooltip />
-                        <Legend />
-                        <Line type="monotone" dataKey="home_impedance_delta" name="Home Δ" stroke="#1976d2" dot={false} />
-                        <Line type="monotone" dataKey="away_impedance_delta" name="Away Δ" stroke="#9c27b0" dot={false} />
-                        <Line type="monotone" dataKey="draw_impedance_delta" name="Draw Δ" stroke="#2e7d32" dot={false} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </Paper> */}
-                </>
+              {hasBookRiskL3 && (
+                <Paper sx={{ p: 1, mb: 2, height: 280 }}>
+                  <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>Book Risk L3 (H / A / D)</Typography>
+                  <ResponsiveContainer width="100%" height={240}>
+                    <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="time" />
+                      <YAxis />
+                      <RechartsTooltip />
+                      <Legend />
+                      <Line type="monotone" dataKey="home_book_risk_l3" name="Home" stroke="#1976d2" dot={false} />
+                      <Line type="monotone" dataKey="away_book_risk_l3" name="Away" stroke="#9c27b0" dot={false} />
+                      <Line type="monotone" dataKey="draw_book_risk_l3" name="Draw" stroke="#2e7d32" dot={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </Paper>
               )}
-
+              {includeImpedance && hasImpedance && (
+                <Paper sx={{ p: 1, mb: 2, height: 280 }}>
+                  <Box sx={{ px: 1 }}>
+                    <Tooltip title={IMPEDANCE_INDEX_TOOLTIP}>
+                      <Typography variant="caption" color="text.secondary" component="span">Impedance Index (H / A / D)</Typography>
+                    </Tooltip>
+                  </Box>
+                  <ResponsiveContainer width="100%" height={240}>
+                    <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                      <CartesianGrid strokeDasharray="3 3" />
+                      <XAxis dataKey="time" />
+                      <YAxis />
+                      <RechartsTooltip />
+                      <Legend />
+                      <Line type="monotone" dataKey="home_impedance_raw" name="Home" stroke="#1976d2" dot={false} />
+                      <Line type="monotone" dataKey="away_impedance_raw" name="Away" stroke="#9c27b0" dot={false} />
+                      <Line type="monotone" dataKey="draw_impedance_raw" name="Draw" stroke="#2e7d32" dot={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </Paper>
+              )}
               <Paper sx={{ p: 1, mb: 2, height: 220 }}>
                 <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>Total volume</Typography>
                 <ResponsiveContainer width="100%" height={180}>
@@ -471,15 +418,12 @@ export function EventDetail({
                       <TableCell align="left" title="L3 best back size">backSize (L3)</TableCell>
                       <TableCell align="left" title="3-way book exposure at top 3 back levels. R[o]=W[o]-L[o]; &gt;0 = book loses if outcome wins.">Book Risk L3 (H/A/D)</TableCell>
                       <TableCell align="left">Imbalance</TableCell>
-                      <TableCell align="left" title={SIZE_IMPEDANCE_L1_TOOLTIP}>Size Impedance Index (L1)</TableCell>
-                      <TableCell align="left" title={STAKE_IMPEDANCE_TOOLTIP}>Stake Impedance Index</TableCell>
+                      <TableCell align="left" title={IMPEDANCE_INDEX_TOOLTIP}>Impedance Index</TableCell>
                       <TableCell align="right">total_volume</TableCell>
                     </TableRow>
                   </TableHead>
                   <TableBody>
-                    {last10.map((p, i) => {
-                      const sizeL1 = computeSizeImpedanceL1(p)
-                      return (
+                    {last10.map((p, i) => (
                         <TableRow key={i}>
                           <TableCell>{p.snapshot_at ? formatTime(p.snapshot_at) : '—'}</TableCell>
                           <TableCell align="left">
@@ -535,9 +479,6 @@ export function EventDetail({
                             <HadCell home={p.home_risk} away={p.away_risk} draw={p.draw_risk} />
                           </TableCell>
                           <TableCell align="left">
-                            <HadCell home={sizeL1.home} away={sizeL1.away} draw={sizeL1.draw} />
-                          </TableCell>
-                          <TableCell align="left">
                             <HadCell
                               home={p.impedance?.home ?? null}
                               away={p.impedance?.away ?? null}
@@ -546,8 +487,7 @@ export function EventDetail({
                           </TableCell>
                           <TableCell align="right">{num(p.total_volume)}</TableCell>
                         </TableRow>
-                      )
-                    })}
+                    ))}
                   </TableBody>
                 </Table>
               </TableContainer>
@@ -559,7 +499,7 @@ export function EventDetail({
             <Typography variant="caption" color="text.secondary" display="block">Data notes</Typography>
             <Typography variant="body2">
               Snapshot interval: 15 minutes. total_volume is market-level totalMatched; per-runner matched volume may be unavailable via REST.
-              backOdds/backSize (L1/L2/L3) are best three back levels; Size Impedance Index (L1) is computed from L1 back sizes when provided.
+              backOdds/backSize (L1/L2/L3) are best three back levels. Impedance Index is VWAP/top-N modelled exposure.
             </Typography>
             {latest && timeseries.length > 0 && (
               <Typography variant="body2" sx={{ mt: 0.5 }}>
