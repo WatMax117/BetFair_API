@@ -168,6 +168,10 @@ export type DebugSnapshotRow = {
   home_impedance?: number | null
   away_impedance?: number | null
   draw_impedance?: number | null
+  /** Timeseries uses impedance object; Debug uses flat home_impedance etc. */
+  impedance?: HadTriplet | null
+  /** Timeseries uses total_volume; Debug uses mdm_total_volume. */
+  total_volume?: number | null
   home_impedance_norm?: number | null
   away_impedance_norm?: number | null
   draw_impedance_norm?: number | null

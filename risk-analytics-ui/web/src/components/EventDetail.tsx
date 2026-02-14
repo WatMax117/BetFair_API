@@ -480,7 +480,7 @@ export function EventDetail({
                               draw={p.impedance?.draw ?? p.draw_impedance ?? null}
                             />
                           </TableCell>
-                          <TableCell align="right">{num(p.total_volume ?? p.mdm_total_volume ?? null)}</TableCell>
+                          <TableCell align="right">{num(p.mdm_total_volume ?? p.total_volume ?? null)}</TableCell>
                         </TableRow>
                     ))}
                   </TableBody>
