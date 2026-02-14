@@ -465,9 +465,10 @@ export function EventDetail({
                       <TableCell>snapshot_at</TableCell>
                       <TableCell align="left" title="L1 best back odds">backOdds (L1)</TableCell>
                       <TableCell align="left" title="Best back size (L1 only)">backSize (L1)</TableCell>
-                      <TableCell align="left" title="Best lay size (L1 only)">laySize (L1)</TableCell>
-                      <TableCell align="left" title="Back stake (top-N VWAP)">backStake (top-N VWAP)</TableCell>
-                      <TableCell align="left" title="Lay stake (top-N VWAP)">layStake (top-N VWAP)</TableCell>
+                      <TableCell align="left" title="L2 best back odds">backOdds (L2)</TableCell>
+                      <TableCell align="left" title="L2 best back size">backSize (L2)</TableCell>
+                      <TableCell align="left" title="L3 best back odds">backOdds (L3)</TableCell>
+                      <TableCell align="left" title="L3 best back size">backSize (L3)</TableCell>
                       <TableCell align="left" title="3-way book exposure at top 3 back levels. R[o]=W[o]-L[o]; &gt;0 = book loses if outcome wins.">Book Risk L3 (H/A/D)</TableCell>
                       <TableCell align="left">Imbalance</TableCell>
                       <TableCell align="left" title={SIZE_IMPEDANCE_L1_TOOLTIP}>Size Impedance Index (L1)</TableCell>
@@ -497,23 +498,30 @@ export function EventDetail({
                           </TableCell>
                           <TableCell align="left">
                             <HadCell
-                              home={p.home_best_lay_size_l1 ?? null}
-                              away={p.away_best_lay_size_l1 ?? null}
-                              draw={p.draw_best_lay_size_l1 ?? null}
+                              home={p.home_back_odds_l2 ?? null}
+                              away={p.away_back_odds_l2 ?? null}
+                              draw={p.draw_back_odds_l2 ?? null}
                             />
                           </TableCell>
                           <TableCell align="left">
                             <HadCell
-                              home={p.impedanceInputs?.home?.backStake ?? null}
-                              away={p.impedanceInputs?.away?.backStake ?? null}
-                              draw={p.impedanceInputs?.draw?.backStake ?? null}
+                              home={p.home_back_size_l2 ?? null}
+                              away={p.away_back_size_l2 ?? null}
+                              draw={p.draw_back_size_l2 ?? null}
                             />
                           </TableCell>
                           <TableCell align="left">
                             <HadCell
-                              home={p.impedanceInputs?.home?.layStake ?? null}
-                              away={p.impedanceInputs?.away?.layStake ?? null}
-                              draw={p.impedanceInputs?.draw?.layStake ?? null}
+                              home={p.home_back_odds_l3 ?? null}
+                              away={p.away_back_odds_l3 ?? null}
+                              draw={p.draw_back_odds_l3 ?? null}
+                            />
+                          </TableCell>
+                          <TableCell align="left">
+                            <HadCell
+                              home={p.home_back_size_l3 ?? null}
+                              away={p.away_back_size_l3 ?? null}
+                              draw={p.draw_back_size_l3 ?? null}
                             />
                           </TableCell>
                           <TableCell align="left">
@@ -551,7 +559,7 @@ export function EventDetail({
             <Typography variant="caption" color="text.secondary" display="block">Data notes</Typography>
             <Typography variant="body2">
               Snapshot interval: 15 minutes. total_volume is market-level totalMatched; per-runner matched volume may be unavailable via REST.
-              backSize (L1) / laySize (L1) are best-level sizes; Size Impedance Index (L1) is computed from L1 back sizes when provided.
+              backOdds/backSize (L1/L2/L3) are best three back levels; Size Impedance Index (L1) is computed from L1 back sizes when provided.
             </Typography>
             {latest && timeseries.length > 0 && (
               <Typography variant="body2" sx={{ mt: 0.5 }}>

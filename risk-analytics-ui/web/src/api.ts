@@ -78,6 +78,19 @@ export type TimeseriesPoint = {
   home_best_lay_size_l1?: number | null
   away_best_lay_size_l1?: number | null
   draw_best_lay_size_l1?: number | null
+  /** L2/L3 back levels (odds and size per outcome). */
+  home_back_odds_l2?: number | null
+  home_back_size_l2?: number | null
+  home_back_odds_l3?: number | null
+  home_back_size_l3?: number | null
+  away_back_odds_l2?: number | null
+  away_back_size_l2?: number | null
+  away_back_odds_l3?: number | null
+  away_back_size_l3?: number | null
+  draw_back_odds_l2?: number | null
+  draw_back_size_l2?: number | null
+  draw_back_odds_l3?: number | null
+  draw_back_size_l3?: number | null
   /** 3-way Book Risk (exposure) at 3 levels: R[o]=W[o]-L[o]. >0 = book loses if outcome wins. */
   home_book_risk_l3?: number | null
   away_book_risk_l3?: number | null
@@ -136,6 +149,19 @@ export type DebugSnapshotRow = {
   home_roi_toxic_N?: number | null
   away_roi_toxic_N?: number | null
   draw_roi_toxic_N?: number | null
+  /** L2/L3 back levels (odds and size per outcome). */
+  home_back_odds_l2?: number | null
+  home_back_size_l2?: number | null
+  home_back_odds_l3?: number | null
+  home_back_size_l3?: number | null
+  away_back_odds_l2?: number | null
+  away_back_size_l2?: number | null
+  away_back_odds_l3?: number | null
+  away_back_size_l3?: number | null
+  draw_back_odds_l2?: number | null
+  draw_back_size_l2?: number | null
+  draw_back_odds_l3?: number | null
+  draw_back_size_l3?: number | null
   home_impedance?: number | null
   away_impedance?: number | null
   draw_impedance?: number | null

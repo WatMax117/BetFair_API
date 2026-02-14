@@ -193,6 +193,28 @@ def _fetch_market_books(trading, market_ids, start_ts: float):
     )
 
 
+def _back_level_at(runner: Any, level: int) -> tuple:
+    """Extract (price, size) from availableToBack level index (0=L1, 1=L2, 2=L3). Returns (0.0, 0.0) if missing or invalid."""
+    ex = runner.get("ex") if isinstance(runner, dict) else getattr(runner, "ex", None)
+    if not ex:
+        return 0.0, 0.0
+    atb = ex.get("availableToBack") if isinstance(ex, dict) else getattr(ex, "availableToBack", None) or getattr(ex, "available_to_back", None)
+    if not atb or level >= len(atb):
+        return 0.0, 0.0
+    lev = atb[level]
+    if isinstance(lev, (list, tuple)) and len(lev) >= 2:
+        price = _safe_float(lev[0])
+        size = _safe_float(lev[1])
+    elif isinstance(lev, dict):
+        price = _safe_float(lev.get("price") or lev.get("Price"))
+        size = _safe_float(lev.get("size") or lev.get("Size") or 0)
+    else:
+        return 0.0, 0.0
+    if price <= 1 or size <= 0:
+        return 0.0, 0.0
+    return price, size
+
+
 def _best_back_lay(runner: Any) -> tuple:
     """First-level best back and best lay from runner.ex. Returns (best_back, best_lay, best_back_size_l1, best_lay_size_l1); 0.0 if missing or invalid (price <= 1 or size <= 0)."""
     ex = runner.get("ex") if isinstance(runner, dict) else getattr(runner, "ex", None)
@@ -245,6 +267,13 @@ def _runner_best_prices(runners: list, runner_metadata: Dict) -> Dict[str, float
         out[f"{role_lower}_best_lay"] = best_lay
         out[f"{role_lower}_best_back_size_l1"] = best_back_size_l1
         out[f"{role_lower}_best_lay_size_l1"] = best_lay_size_l1
+        # L2 and L3 back levels
+        odds_l2, size_l2 = _back_level_at(r, 1)
+        odds_l3, size_l3 = _back_level_at(r, 2)
+        out[f"{role_lower}_back_odds_l2"] = odds_l2 if odds_l2 > 0 else None
+        out[f"{role_lower}_back_size_l2"] = size_l2 if size_l2 > 0 else None
+        out[f"{role_lower}_back_odds_l3"] = odds_l3 if odds_l3 > 0 else None
+        out[f"{role_lower}_back_size_l3"] = size_l3 if size_l3 > 0 else None
     return out
 
 
@@ -407,6 +436,9 @@ def _ensure_three_layer_tables(conn):
             "draw_back_stake", "draw_back_odds", "draw_lay_stake", "draw_lay_odds",
             "home_best_back_size_l1", "away_best_back_size_l1", "draw_best_back_size_l1",
             "home_best_lay_size_l1", "away_best_lay_size_l1", "draw_best_lay_size_l1",
+            "home_back_odds_l2", "home_back_size_l2", "home_back_odds_l3", "home_back_size_l3",
+            "away_back_odds_l2", "away_back_size_l2", "away_back_odds_l3", "away_back_size_l3",
+            "draw_back_odds_l2", "draw_back_size_l2", "draw_back_odds_l3", "draw_back_size_l3",
         ):
             cur.execute(
                 """
@@ -540,6 +572,18 @@ def _insert_derived_metrics(conn, snapshot_id: int, snapshot_at, market_id: str,
         "home_best_lay_size_l1": metrics.get("home_best_lay_size_l1"),
         "away_best_lay_size_l1": metrics.get("away_best_lay_size_l1"),
         "draw_best_lay_size_l1": metrics.get("draw_best_lay_size_l1"),
+        "home_back_odds_l2": metrics.get("home_back_odds_l2"),
+        "home_back_size_l2": metrics.get("home_back_size_l2"),
+        "home_back_odds_l3": metrics.get("home_back_odds_l3"),
+        "home_back_size_l3": metrics.get("home_back_size_l3"),
+        "away_back_odds_l2": metrics.get("away_back_odds_l2"),
+        "away_back_size_l2": metrics.get("away_back_size_l2"),
+        "away_back_odds_l3": metrics.get("away_back_odds_l3"),
+        "away_back_size_l3": metrics.get("away_back_size_l3"),
+        "draw_back_odds_l2": metrics.get("draw_back_odds_l2"),
+        "draw_back_size_l2": metrics.get("draw_back_size_l2"),
+        "draw_back_odds_l3": metrics.get("draw_back_odds_l3"),
+        "draw_back_size_l3": metrics.get("draw_back_size_l3"),
     }
     with conn.cursor() as cur:
         cur.execute(
@@ -558,7 +602,10 @@ def _insert_derived_metrics(conn, snapshot_id: int, snapshot_at, market_id: str,
                 away_back_stake, away_back_odds, away_lay_stake, away_lay_odds,
                 draw_back_stake, draw_back_odds, draw_lay_stake, draw_lay_odds,
                 home_best_back_size_l1, away_best_back_size_l1, draw_best_back_size_l1,
-                home_best_lay_size_l1, away_best_lay_size_l1, draw_best_lay_size_l1
+                home_best_lay_size_l1, away_best_lay_size_l1, draw_best_lay_size_l1,
+                home_back_odds_l2, home_back_size_l2, home_back_odds_l3, home_back_size_l3,
+                away_back_odds_l2, away_back_size_l2, away_back_odds_l3, away_back_size_l3,
+                draw_back_odds_l2, draw_back_size_l2, draw_back_odds_l3, draw_back_size_l3
             )
             VALUES (
                 %(snapshot_id)s, %(snapshot_at)s, %(market_id)s,
@@ -574,7 +621,10 @@ def _insert_derived_metrics(conn, snapshot_id: int, snapshot_at, market_id: str,
                 %(away_back_stake)s, %(away_back_odds)s, %(away_lay_stake)s, %(away_lay_odds)s,
                 %(draw_back_stake)s, %(draw_back_odds)s, %(draw_lay_stake)s, %(draw_lay_odds)s,
                 %(home_best_back_size_l1)s, %(away_best_back_size_l1)s, %(draw_best_back_size_l1)s,
-                %(home_best_lay_size_l1)s, %(away_best_lay_size_l1)s, %(draw_best_lay_size_l1)s
+                %(home_best_lay_size_l1)s, %(away_best_lay_size_l1)s, %(draw_best_lay_size_l1)s,
+                %(home_back_odds_l2)s, %(home_back_size_l2)s, %(home_back_odds_l3)s, %(home_back_size_l3)s,
+                %(away_back_odds_l2)s, %(away_back_size_l2)s, %(away_back_odds_l3)s, %(away_back_size_l3)s,
+                %(draw_back_odds_l2)s, %(draw_back_size_l2)s, %(draw_back_odds_l3)s, %(draw_back_size_l3)s
             )
             """,
             params,

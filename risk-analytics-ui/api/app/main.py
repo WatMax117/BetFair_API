@@ -449,6 +449,7 @@ def get_event_timeseries(
     imp_cols = (_imp_base + _imp_inp) if include_impedance else ""
     imp_select = imp_cols  # same columns in SELECT
     _l1_size_cols = ", home_best_back_size_l1, away_best_back_size_l1, draw_best_back_size_l1, home_best_lay_size_l1, away_best_lay_size_l1, draw_best_lay_size_l1"
+    _l2_l3_cols = ", home_back_odds_l2, home_back_size_l2, home_back_odds_l3, home_back_size_l3, away_back_odds_l2, away_back_size_l2, away_back_odds_l3, away_back_size_l3, draw_back_odds_l2, draw_back_size_l2, draw_back_odds_l3, draw_back_size_l3"
 
     with cursor() as cur:
         cur.execute(
@@ -465,6 +466,7 @@ def get_event_timeseries(
                     depth_limit,
                     calculation_version
                     """ + _l1_size_cols + """
+                    """ + _l2_l3_cols + """
                     """ + imp_cols + """
                 FROM market_derived_metrics
                 WHERE market_id = %s
@@ -483,6 +485,7 @@ def get_event_timeseries(
                     depth_limit,
                     calculation_version
                     """ + _l1_size_cols + """
+                    """ + _l2_l3_cols + """
                     """ + imp_select + """
                 FROM bucketed
                 ORDER BY bucket_epoch, snapshot_at DESC
@@ -497,6 +500,7 @@ def get_event_timeseries(
                 depth_limit,
                 calculation_version
                 """ + _l1_size_cols + """
+                """ + _l2_l3_cols + """
                 """ + imp_select + """
             FROM latest_in_bucket
             ORDER BY snapshot_at ASC
@@ -534,6 +538,18 @@ def get_event_timeseries(
             "home_best_lay_size_l1": _opt_float(r.get("home_best_lay_size_l1")),
             "away_best_lay_size_l1": _opt_float(r.get("away_best_lay_size_l1")),
             "draw_best_lay_size_l1": _opt_float(r.get("draw_best_lay_size_l1")),
+            "home_back_odds_l2": _opt_float(r.get("home_back_odds_l2")),
+            "home_back_size_l2": _opt_float(r.get("home_back_size_l2")),
+            "home_back_odds_l3": _opt_float(r.get("home_back_odds_l3")),
+            "home_back_size_l3": _opt_float(r.get("home_back_size_l3")),
+            "away_back_odds_l2": _opt_float(r.get("away_back_odds_l2")),
+            "away_back_size_l2": _opt_float(r.get("away_back_size_l2")),
+            "away_back_odds_l3": _opt_float(r.get("away_back_odds_l3")),
+            "away_back_size_l3": _opt_float(r.get("away_back_size_l3")),
+            "draw_back_odds_l2": _opt_float(r.get("draw_back_odds_l2")),
+            "draw_back_size_l2": _opt_float(r.get("draw_back_size_l2")),
+            "draw_back_odds_l3": _opt_float(r.get("draw_back_odds_l3")),
+            "draw_back_size_l3": _opt_float(r.get("draw_back_size_l3")),
         }
         if include_impedance and "home_impedance" in r:
             out["impedance"] = {
@@ -726,6 +742,9 @@ def get_market_snapshots(
                 d.home_impedance, d.away_impedance, d.draw_impedance,
                 d.home_impedance_norm, d.away_impedance_norm, d.draw_impedance_norm,
                 d.home_book_risk_l3, d.away_book_risk_l3, d.draw_book_risk_l3,
+                d.home_back_odds_l2, d.home_back_size_l2, d.home_back_odds_l3, d.home_back_size_l3,
+                d.away_back_odds_l2, d.away_back_size_l2, d.away_back_odds_l3, d.away_back_size_l3,
+                d.draw_back_odds_l2, d.draw_back_size_l2, d.draw_back_odds_l3, d.draw_back_size_l3,
                 e.event_id, e.event_name, e.competition_name, e.event_open_date,
                 e.home_runner_name, e.away_runner_name, e.draw_runner_name,
                 e.market_name AS meta_market_name,
