@@ -426,6 +426,133 @@ def get_league_events(
     return [_row_to_event(r) for r in rows]
 
 
+@app.get("/events/book-risk-focus")
+def get_book_risk_focus_events(
+    from_ts: Optional[str] = Query(None),
+    to_ts: Optional[str] = Query(None),
+    include_in_play: bool = Query(True, description="Include in-play events"),
+    in_play_lookback_hours: float = Query(6.0, ge=0, le=168),
+    include_impedance: bool = Query(True, description="Include impedance per outcome"),
+    include_impedance_inputs: bool = Query(False, description="Include raw impedance inputs"),
+    limit: int = Query(500, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+):
+    """All events in the time window with latest metrics including Book Risk L3. Same time filter logic as leagues."""
+    now = datetime.now(timezone.utc)
+    from_dt = _parse_ts(from_ts, now)
+    to_dt = _parse_ts(to_ts, now + timedelta(hours=24))
+    if include_in_play:
+        in_play_from = now - timedelta(hours=in_play_lookback_hours)
+        from_effective = min(from_dt, in_play_from)
+    else:
+        from_effective = from_dt
+
+    _imp_base = ", d.home_impedance, d.away_impedance, d.draw_impedance, d.home_impedance_norm, d.away_impedance_norm, d.draw_impedance_norm"
+    _imp_inputs = ", d.home_back_stake, d.home_back_odds, d.home_lay_stake, d.home_lay_odds, d.away_back_stake, d.away_back_odds, d.away_lay_stake, d.away_lay_odds, d.draw_back_stake, d.draw_back_odds, d.draw_lay_stake, d.draw_lay_odds" if include_impedance_inputs else ""
+    impedance_cols = (_imp_base + _imp_inputs) if include_impedance else ""
+    impedance_select = ""
+    if include_impedance:
+        impedance_select = ", l.home_impedance, l.away_impedance, l.draw_impedance, l.home_impedance_norm, l.away_impedance_norm, l.draw_impedance_norm"
+        if include_impedance_inputs:
+            impedance_select += ", l.home_back_stake, l.home_back_odds, l.home_lay_stake, l.home_lay_odds, l.away_back_stake, l.away_back_odds, l.away_lay_stake, l.away_lay_odds, l.draw_back_stake, l.draw_back_odds, l.draw_lay_stake, l.draw_lay_odds"
+
+    with cursor() as cur:
+        cur.execute(
+            """
+            WITH latest AS (
+                SELECT DISTINCT ON (d.market_id)
+                    d.market_id,
+                    d.snapshot_id,
+                    d.snapshot_at,
+                    d.home_risk, d.away_risk, d.draw_risk,
+                    d.home_book_risk_l3, d.away_book_risk_l3, d.draw_book_risk_l3,
+                    d.home_best_back, d.away_best_back, d.draw_best_back,
+                    d.home_best_lay, d.away_best_lay, d.draw_best_lay,
+                    d.total_volume,
+                    d.depth_limit,
+                    d.calculation_version
+                    """ + impedance_cols + """
+                FROM market_derived_metrics d
+                ORDER BY d.market_id, d.snapshot_at DESC
+            )
+            SELECT
+                e.market_id,
+                e.event_id,
+                e.event_name,
+                e.event_open_date,
+                e.competition_name,
+                l.snapshot_at AS latest_snapshot_at,
+                l.home_risk, l.away_risk, l.draw_risk,
+                l.home_book_risk_l3, l.away_book_risk_l3, l.draw_book_risk_l3,
+                l.home_best_back, l.away_best_back, l.draw_best_back,
+                l.home_best_lay, l.away_best_lay, l.draw_best_lay,
+                l.total_volume,
+                l.depth_limit,
+                l.calculation_version
+                """ + impedance_select + """
+            FROM market_event_metadata e
+            JOIN latest l ON l.market_id = e.market_id
+            WHERE e.event_open_date IS NOT NULL
+              AND e.event_open_date >= %s
+              AND e.event_open_date <= %s
+            ORDER BY e.event_open_date ASC
+            LIMIT %s OFFSET %s
+            """,
+            (from_effective, to_dt, limit, offset),
+        )
+        rows = cur.fetchall()
+
+    def _row_to_event(r: Any) -> dict:
+        out = {
+            "market_id": r["market_id"],
+            "event_id": r.get("event_id"),
+            "event_name": r["event_name"],
+            "event_open_date": r["event_open_date"].isoformat() if r.get("event_open_date") else None,
+            "competition_name": r["competition_name"],
+            "latest_snapshot_at": r["latest_snapshot_at"].isoformat() if r.get("latest_snapshot_at") else None,
+            "home_risk": float(r["home_risk"]) if r.get("home_risk") is not None else None,
+            "away_risk": float(r["away_risk"]) if r.get("away_risk") is not None else None,
+            "draw_risk": float(r["draw_risk"]) if r.get("draw_risk") is not None else None,
+            "home_book_risk_l3": _opt_float(r.get("home_book_risk_l3")),
+            "away_book_risk_l3": _opt_float(r.get("away_book_risk_l3")),
+            "draw_book_risk_l3": _opt_float(r.get("draw_book_risk_l3")),
+            "imbalance": {
+                "home": _opt_float(r.get("home_risk")),
+                "away": _opt_float(r.get("away_risk")),
+                "draw": _opt_float(r.get("draw_risk")),
+            },
+            "home_best_back": float(r["home_best_back"]) if r.get("home_best_back") is not None else None,
+            "away_best_back": float(r["away_best_back"]) if r.get("away_best_back") is not None else None,
+            "draw_best_back": float(r["draw_best_back"]) if r.get("draw_best_back") is not None else None,
+            "home_best_lay": float(r["home_best_lay"]) if r.get("home_best_lay") is not None else None,
+            "away_best_lay": float(r["away_best_lay"]) if r.get("away_best_lay") is not None else None,
+            "draw_best_lay": float(r["draw_best_lay"]) if r.get("draw_best_lay") is not None else None,
+            "total_volume": float(r["total_volume"]) if r.get("total_volume") is not None else None,
+            "depth_limit": r.get("depth_limit"),
+            "calculation_version": r.get("calculation_version"),
+        }
+        if include_impedance and "home_impedance" in r:
+            out["impedance"] = {
+                "home": _opt_float(r.get("home_impedance")),
+                "away": _opt_float(r.get("away_impedance")),
+                "draw": _opt_float(r.get("draw_impedance")),
+            }
+            out["impedanceNorm"] = {
+                "home": _opt_float(r.get("home_impedance_norm")),
+                "away": _opt_float(r.get("away_impedance_norm")),
+                "draw": _opt_float(r.get("draw_impedance_norm")),
+            }
+            if include_impedance_inputs:
+                out["impedanceInputs"] = {
+                    "home": _impedance_inputs_from_row(r, "home"),
+                    "away": _impedance_inputs_from_row(r, "away"),
+                    "draw": _impedance_inputs_from_row(r, "draw"),
+                }
+        return out
+
+    return [_row_to_event(r) for r in rows]
+
+
 @app.get("/events/{market_id}/timeseries")
 def get_event_timeseries(
     market_id: str,

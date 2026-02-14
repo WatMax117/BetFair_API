@@ -49,6 +49,10 @@ export type EventItem = {
   impedanceNorm?: HadTriplet
   /** Present when includeImpedance=true and include_impedance_inputs=true. Raw inputs per outcome for auditing. */
   impedanceInputs?: ImpedanceInputs
+  /** Book Risk L3 (H/A/D) from latest snapshot. Present in book-risk-focus endpoint. */
+  home_book_risk_l3?: number | null
+  away_book_risk_l3?: number | null
+  draw_book_risk_l3?: number | null
 }
 
 export type TimeseriesPoint = {
@@ -276,6 +280,30 @@ export async function fetchEventTimeseries(
   const res = await fetch(
     `${API_BASE}/events/${encodeURIComponent(marketId)}/timeseries?${params}`
   )
+  if (!res.ok) throw new Error(res.statusText)
+  return res.json()
+}
+
+/** Book Risk focus: all events in window with latest metrics including Book Risk L3. */
+export async function fetchBookRiskFocusEvents(
+  from: Date,
+  to: Date,
+  includeInPlay = true,
+  inPlayLookbackHours = 6,
+  includeImpedance = true,
+  limit = 500,
+  offset = 0
+): Promise<EventItem[]> {
+  const params = new URLSearchParams({
+    from_ts: toISO(from),
+    to_ts: toISO(to),
+    include_in_play: String(includeInPlay),
+    in_play_lookback_hours: String(inPlayLookbackHours),
+    include_impedance: String(includeImpedance),
+    limit: String(limit),
+    offset: String(offset),
+  })
+  const res = await fetch(`${API_BASE}/events/book-risk-focus?${params}`)
   if (!res.ok) throw new Error(res.statusText)
   return res.json()
 }

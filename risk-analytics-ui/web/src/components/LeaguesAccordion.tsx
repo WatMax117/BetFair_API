@@ -11,7 +11,8 @@ import Switch from '@mui/material/Switch'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import SearchIcon from '@mui/icons-material/Search'
 import { EventsTable } from './EventsTable'
-import { fetchLeagues, fetchLeagueEvents } from '../api'
+import { SortedEventsList, loadSortState, type SortState } from './SortedEventsList'
+import { fetchLeagues, fetchLeagueEvents, fetchBookRiskFocusEvents } from '../api'
 import type { LeagueItem, EventItem } from '../api'
 
 const DEFAULT_WINDOW_HOURS = 24
@@ -20,8 +21,9 @@ const DEFAULT_IN_PLAY_LOOKBACK_HOURS = 6
 
 function getWindowDates(hours: number): { from: Date; to: Date } {
   const now = new Date()
-  const from = new Date(now)
-  const to = new Date(now.getTime() + hours * 60 * 60 * 1000)
+  const ms = hours * 60 * 60 * 1000
+  const from = new Date(now.getTime() - ms)
+  const to = new Date(now.getTime() + ms)
   return { from, to }
 }
 
@@ -41,10 +43,18 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
   const [eventsByLeague, setEventsByLeague] = useState<Record<string, EventItem[]>>({})
   const [loadingEvents, setLoadingEvents] = useState<Record<string, boolean>>({})
   const [refreshTrigger, setRefreshTrigger] = useState(0)
+  const [bookRiskFocus, setBookRiskFocus] = useState(false)
+  const [focusEvents, setFocusEvents] = useState<EventItem[]>([])
+  const [loadingFocus, setLoadingFocus] = useState(false)
+  const [sortState, setSortState] = useState<SortState>(loadSortState)
+  const [onlyActiveInPlay, setOnlyActiveInPlay] = useState(true)
 
   const { from, to } = useMemo(() => getWindowDates(windowHours), [windowHours])
 
+  const loadLeaguesRequestIdRef = useRef(0)
+
   const loadLeagues = useCallback(async () => {
+    const requestId = ++loadLeaguesRequestIdRef.current
     setLoading(true)
     setError(null)
     try {
@@ -57,11 +67,24 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
         DEFAULT_LIMIT,
         0
       )
-      setLeagues(data)
+      if (requestId !== loadLeaguesRequestIdRef.current) {
+        console.warn('[LeaguesAccordion] Ignoring stale leagues response', { requestId, current: loadLeaguesRequestIdRef.current })
+        return
+      }
+      const list = Array.isArray(data) ? data : (data && Array.isArray((data as { items?: unknown }).items) ? (data as { items: LeagueItem[] }).items : [])
+      if (!Array.isArray(data)) {
+        console.warn('[LeaguesAccordion] API response was not an array; normalized to list', { data, list })
+      }
+      console.log('[LeaguesAccordion] setLeagues called', { count: list.length, sample: list.slice(0, 2) })
+      setLeagues(list)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load leagues')
+      if (requestId === loadLeaguesRequestIdRef.current) {
+        setError(e instanceof Error ? e.message : 'Failed to load leagues')
+      }
     } finally {
-      setLoading(false)
+      if (requestId === loadLeaguesRequestIdRef.current) {
+        setLoading(false)
+      }
     }
   }, [from.getTime(), to.getTime(), searchApplied, includeInPlay, inPlayLookbackHours, refreshTrigger])
 
@@ -83,15 +106,59 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
     }
   }, [searchApplied, loadLeagues])
 
+  useEffect(() => {
+    console.log('[LeaguesAccordion] render state', {
+      searchApplied,
+      loading,
+      leaguesLength: leagues.length,
+      leaguesIsArray: Array.isArray(leagues),
+      firstItem: leagues[0],
+    })
+  }, [searchApplied, loading, leagues])
+
   const eventsByLeagueRef = useRef(eventsByLeague)
   eventsByLeagueRef.current = eventsByLeague
+
+  const loadFocusEvents = useCallback(async () => {
+    setLoadingFocus(true)
+    try {
+      const data = await fetchBookRiskFocusEvents(
+        from,
+        to,
+        includeInPlay,
+        inPlayLookbackHours,
+        true,
+        500,
+        0
+      )
+      setFocusEvents(data)
+    } catch {
+      setFocusEvents([])
+    } finally {
+      setLoadingFocus(false)
+    }
+  }, [from.getTime(), to.getTime(), includeInPlay, inPlayLookbackHours])
+
+  useEffect(() => {
+    if (bookRiskFocus) {
+      loadFocusEvents()
+    } else {
+      setFocusEvents([])
+    }
+  }, [bookRiskFocus, loadFocusEvents])
+
+  const focusEventsFiltered = useMemo(() => {
+    if (!onlyActiveInPlay) return focusEvents
+    const now = new Date().toISOString()
+    return focusEvents.filter((e) => (e.event_open_date ?? '') < now)
+  }, [focusEvents, onlyActiveInPlay])
 
   const handleAccordionChange = useCallback(
     (league: string) => (_: React.SyntheticEvent, isExpanded: boolean) => {
       setExpandedLeague(isExpanded ? league : null)
       if (isExpanded && !eventsByLeagueRef.current[league]) {
         setLoadingEvents((prev) => ({ ...prev, [league]: true }))
-        fetchLeagueEvents(league, from, to, includeInPlay, inPlayLookbackHours, DEFAULT_LIMIT, 0)
+        fetchLeagueEvents(league, from, to, includeInPlay, inPlayLookbackHours, false, DEFAULT_LIMIT, 0)
           .then((events) => {
             setEventsByLeague((prev) => ({ ...prev, [league]: events }))
           })
@@ -113,12 +180,21 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
       <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, mb: 2, alignItems: 'center' }}>
         <TextField
           size="small"
-          label="Time window (hours from now)"
+          label="Time window (hours back and forward from now)"
           type="number"
           value={windowHours}
           onChange={(e) => setWindowHours(Number(e.target.value) || 24)}
           inputProps={{ min: 1, max: 168 }}
-          sx={{ width: 180 }}
+          sx={{ width: 200 }}
+          InputLabelProps={{
+            sx: {
+              whiteSpace: 'normal',
+              overflow: 'visible',
+              textOverflow: 'unset',
+              maxWidth: '100%',
+              lineHeight: 1.2,
+            },
+          }}
         />
         <FormControlLabel
           control={
@@ -167,6 +243,16 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
             Refresh
           </Button>
         )}
+        <FormControlLabel
+          control={
+            <Switch
+              checked={bookRiskFocus}
+              onChange={(e) => setBookRiskFocus(e.target.checked)}
+              color="primary"
+            />
+          }
+          label="Book Risk focus (sortable list)"
+        />
       </Box>
 
       {error && (
@@ -181,8 +267,10 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
         </Typography>
       ) : loading ? (
         <Typography color="text.secondary">Loading leagues…</Typography>
-      ) : leagues.length === 0 ? (
-        <Typography color="text.secondary">No leagues in the selected window. Try a different search or time range.</Typography>
+      ) : !Array.isArray(leagues) || leagues.length === 0 ? (
+        <Typography color="text.secondary" component="span" sx={{ display: 'block' }}>
+          No leagues in the selected window. Queried {from.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })} – {to.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}. Try a larger time window (e.g. 168 hours) or a different search.
+        </Typography>
       ) : (
         <>
         {leagues.length >= DEFAULT_LIMIT && (
@@ -190,7 +278,10 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
             Showing up to {DEFAULT_LIMIT} leagues. Narrow your search for more specific results.
           </Typography>
         )}
-        {leagues.map(({ league, event_count }) => (
+        {(Array.isArray(leagues) ? leagues : []).map((item) => {
+          const league = item?.league ?? ''
+          const event_count = item?.event_count ?? 0
+          return (
           <Accordion
             key={league}
             expanded={expandedLeague === league}
@@ -215,7 +306,25 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
               )}
             </AccordionDetails>
           </Accordion>
-        ))}
+          )
+        })}
+        </>
+      )}
+
+      {bookRiskFocus && (
+        <>
+          {loadingFocus ? (
+            <Typography color="text.secondary" sx={{ mt: 2 }}>Loading focus list…</Typography>
+          ) : (
+            <SortedEventsList
+              events={focusEventsFiltered}
+              sortState={sortState}
+              onSortChange={setSortState}
+              onSelectEvent={onSelectEvent}
+              onlyActiveInPlay={onlyActiveInPlay}
+              onOnlyActiveChange={setOnlyActiveInPlay}
+            />
+          )}
         </>
       )}
     </Box>
