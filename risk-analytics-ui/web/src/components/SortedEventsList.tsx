@@ -74,8 +74,9 @@ function num(v: number | null): string {
   return Number.isInteger(v) ? String(v) : v.toFixed(2)
 }
 
-function sortValue(v: number | null, signed: boolean): number {
-  if (v == null) return signed ? -Infinity : 0
+/** NULL sorts always last (never as 0). */
+function sortValue(v: number | null, signed: boolean, desc: boolean): number {
+  if (v == null) return desc ? -Infinity : Infinity
   return signed ? v : Math.abs(v)
 }
 
@@ -86,6 +87,8 @@ export function SortedEventsList({
   onSelectEvent,
   onlyActiveInPlay = true,
   onOnlyActiveChange,
+  onlyMarketsWithBookRisk = true,
+  onOnlyMarketsWithBookRiskChange,
 }: {
   events: EventItem[]
   sortState: SortState
@@ -93,6 +96,8 @@ export function SortedEventsList({
   onSelectEvent: (e: EventItem) => void
   onlyActiveInPlay?: boolean
   onOnlyActiveChange?: (v: boolean) => void
+  onlyMarketsWithBookRisk?: boolean
+  onOnlyMarketsWithBookRiskChange?: (v: boolean) => void
 }) {
   const sorted = useMemo(() => {
     const key = SORT_KEYS.find((k) => k.id === sortState.field)
@@ -100,8 +105,8 @@ export function SortedEventsList({
 
     const getPrimary = (e: EventItem) => {
       const v = key.getVal(e)
-      if (key.id === 'volume') return v ?? -Infinity
-      return sortValue(v, sortState.signed)
+      if (key.id === 'volume') return v ?? (sortState.desc ? -Infinity : Infinity)
+      return sortValue(v, sortState.signed, sortState.desc)
     }
 
     return [...events].sort((a, b) => {
@@ -201,6 +206,19 @@ export function SortedEventsList({
               />
             }
             label="Only active/in-play"
+          />
+        )}
+        {onOnlyMarketsWithBookRiskChange != null && (
+          <FormControlLabel
+            control={
+              <Switch
+                size="small"
+                checked={onlyMarketsWithBookRisk}
+                onChange={(_, v) => onOnlyMarketsWithBookRiskChange(v)}
+                color="primary"
+              />
+            }
+            label="Only markets with Book Risk"
           />
         )}
       </Box>

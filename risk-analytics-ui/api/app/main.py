@@ -434,6 +434,7 @@ def get_book_risk_focus_events(
     in_play_lookback_hours: float = Query(6.0, ge=0, le=168),
     include_impedance: bool = Query(True, description="Include impedance per outcome"),
     include_impedance_inputs: bool = Query(False, description="Include raw impedance inputs"),
+    require_book_risk: bool = Query(True, description="Only return rows where all three book_risk_l3 are non-NULL"),
     limit: int = Query(500, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
@@ -495,6 +496,7 @@ def get_book_risk_focus_events(
             WHERE e.event_open_date IS NOT NULL
               AND e.event_open_date >= %s
               AND e.event_open_date <= %s
+              """ + (" AND l.home_book_risk_l3 IS NOT NULL AND l.away_book_risk_l3 IS NOT NULL AND l.draw_book_risk_l3 IS NOT NULL" if require_book_risk else "") + """
             ORDER BY e.event_open_date ASC
             LIMIT %s OFFSET %s
             """,

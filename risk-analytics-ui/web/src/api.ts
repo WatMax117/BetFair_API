@@ -291,6 +291,7 @@ export async function fetchBookRiskFocusEvents(
   includeInPlay = true,
   inPlayLookbackHours = 6,
   includeImpedance = true,
+  requireBookRisk = true,
   limit = 500,
   offset = 0
 ): Promise<EventItem[]> {
@@ -300,6 +301,7 @@ export async function fetchBookRiskFocusEvents(
     include_in_play: String(includeInPlay),
     in_play_lookback_hours: String(inPlayLookbackHours),
     include_impedance: String(includeImpedance),
+    require_book_risk: String(requireBookRisk),
     limit: String(limit),
     offset: String(offset),
   })

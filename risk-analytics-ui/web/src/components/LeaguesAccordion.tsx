@@ -48,6 +48,7 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
   const [loadingFocus, setLoadingFocus] = useState(false)
   const [sortState, setSortState] = useState<SortState>(loadSortState)
   const [onlyActiveInPlay, setOnlyActiveInPlay] = useState(true)
+  const [onlyMarketsWithBookRisk, setOnlyMarketsWithBookRisk] = useState(true)
 
   const { from, to } = useMemo(() => getWindowDates(windowHours), [windowHours])
 
@@ -128,6 +129,7 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
         includeInPlay,
         inPlayLookbackHours,
         true,
+        onlyMarketsWithBookRisk,
         500,
         0
       )
@@ -137,7 +139,7 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
     } finally {
       setLoadingFocus(false)
     }
-  }, [from.getTime(), to.getTime(), includeInPlay, inPlayLookbackHours])
+  }, [from.getTime(), to.getTime(), includeInPlay, inPlayLookbackHours, onlyMarketsWithBookRisk])
 
   useEffect(() => {
     if (bookRiskFocus) {
@@ -323,6 +325,8 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
               onSelectEvent={onSelectEvent}
               onlyActiveInPlay={onlyActiveInPlay}
               onOnlyActiveChange={setOnlyActiveInPlay}
+              onlyMarketsWithBookRisk={onlyMarketsWithBookRisk}
+              onOnlyMarketsWithBookRiskChange={setOnlyMarketsWithBookRisk}
             />
           )}
         </>
