@@ -131,12 +131,14 @@ If you pushed images in Phase 1, set image tags. Either:
 
 **Option B – Build on server (no registry)**
 
-Pull latest code and build on the server:
+Pull latest code and build on the server (use `master` if that is your default branch):
 
 ```bash
-git pull origin main
+git pull origin master
 docker compose build betfair-rest-client risk-analytics-ui-api risk-analytics-ui-web
 ```
+
+Alternatively, run the automated script from repo root: `bash scripts/run_production_deploy_sticky200_no_impedance.sh`
 
 No image tag changes needed; compose will use the newly built images.
 
