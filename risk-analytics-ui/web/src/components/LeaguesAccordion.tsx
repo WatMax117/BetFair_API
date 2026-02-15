@@ -126,7 +126,6 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
         to,
         includeInPlay,
         inPlayLookbackHours,
-        true,
         onlyMarketsWithBookRisk,
         500,
         0
@@ -158,7 +157,7 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
       setExpandedLeague(isExpanded ? league : null)
       if (isExpanded && !eventsByLeagueRef.current[league]) {
         setLoadingEvents((prev) => ({ ...prev, [league]: true }))
-        fetchLeagueEvents(league, from, to, includeInPlay, inPlayLookbackHours, false, DEFAULT_LIMIT, 0)
+        fetchLeagueEvents(league, from, to, includeInPlay, inPlayLookbackHours, DEFAULT_LIMIT, 0)
           .then((events) => {
             setEventsByLeague((prev) => ({ ...prev, [league]: events }))
           })
