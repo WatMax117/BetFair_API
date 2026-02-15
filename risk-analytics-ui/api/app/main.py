@@ -226,15 +226,15 @@ def get_leagues(
     from_ts: Optional[str] = Query(None, description="UTC ISO start"),
     to_ts: Optional[str] = Query(None, description="UTC ISO end"),
     q: Optional[str] = Query(None, description="Search substring (event/team name)"),
-    include_in_play: bool = Query(True, description="Include events that have already started (in-play)"),
-    in_play_lookback_hours: float = Query(6.0, ge=0, le=168, description="When include_in_play, extend window back this many hours for in-play"),
+    include_in_play: bool = Query(False, description="Include events that have already started (in-play); default upcoming only"),
+    in_play_lookback_hours: float = Query(2.0, ge=0, le=168, description="When include_in_play, extend window back this many hours for in-play (default 2h)"),
     limit: int = Query(100, ge=1, le=200, description="Max leagues to return"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
 ):
-    """List leagues (competition_name) with event counts in the given time window."""
+    """List leagues (competition_name) with event counts. Default: current and upcoming only (now to now+48h UTC)."""
     now = datetime.now(timezone.utc)
     from_dt = _parse_ts(from_ts, now)
-    to_dt = _parse_ts(to_ts, now + timedelta(hours=24))
+    to_dt = _parse_ts(to_ts, now + timedelta(hours=48))
     if include_in_play:
         in_play_from = now - timedelta(hours=in_play_lookback_hours)
         from_effective = min(from_dt, in_play_from)
@@ -287,16 +287,16 @@ def get_league_events(
     league_name: str,
     from_ts: Optional[str] = Query(None),
     to_ts: Optional[str] = Query(None),
-    include_in_play: bool = Query(True, description="Include in-play events"),
-    in_play_lookback_hours: float = Query(6.0, ge=0, le=168),
+    include_in_play: bool = Query(False, description="Include in-play events; default upcoming only"),
+    in_play_lookback_hours: float = Query(2.0, ge=0, le=168, description="When include_in_play, look back this many hours (default 2h)"),
     limit: int = Query(100, ge=1, le=200, description="Max events to return"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
 ):
-    """Events in the league with latest snapshot (odds + total_volume). Imbalance and Impedance indices removed (MVP simplification)."""
+    """Events in the league with latest snapshot. Default: current and upcoming only (now to now+48h UTC), ORDER BY event_open_date ASC."""
     league_decoded = unquote(league_name)
     now = datetime.now(timezone.utc)
     from_dt = _parse_ts(from_ts, now)
-    to_dt = _parse_ts(to_ts, now + timedelta(hours=24))
+    to_dt = _parse_ts(to_ts, now + timedelta(hours=48))
     if include_in_play:
         in_play_from = now - timedelta(hours=in_play_lookback_hours)
         from_effective = min(from_dt, in_play_from)
@@ -375,16 +375,16 @@ def get_league_events(
 def get_book_risk_focus_events(
     from_ts: Optional[str] = Query(None),
     to_ts: Optional[str] = Query(None),
-    include_in_play: bool = Query(True, description="Include in-play events"),
-    in_play_lookback_hours: float = Query(6.0, ge=0, le=168),
+    include_in_play: bool = Query(False, description="Include in-play events; default upcoming only"),
+    in_play_lookback_hours: float = Query(2.0, ge=0, le=168, description="When include_in_play, look back this many hours (default 2h)"),
     require_book_risk: bool = Query(True, description="Only return rows where all three book_risk_l3 are non-NULL"),
     limit: int = Query(500, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
-    """All events in the time window with latest metrics including Book Risk L3. Imbalance/Impedance removed (MVP)."""
+    """All events in the time window with latest metrics including Book Risk L3. Default: current and upcoming only (now to now+48h UTC)."""
     now = datetime.now(timezone.utc)
     from_dt = _parse_ts(from_ts, now)
-    to_dt = _parse_ts(to_ts, now + timedelta(hours=24))
+    to_dt = _parse_ts(to_ts, now + timedelta(hours=48))
     if include_in_play:
         in_play_from = now - timedelta(hours=in_play_lookback_hours)
         from_effective = min(from_dt, in_play_from)

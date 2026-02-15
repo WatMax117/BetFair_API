@@ -147,8 +147,8 @@ export async function fetchLeagues(
   from: Date,
   to: Date,
   q?: string,
-  includeInPlay = true,
-  inPlayLookbackHours = 6,
+  includeInPlay = false,
+  inPlayLookbackHours = 2,
   limit = 100,
   offset = 0
 ): Promise<LeagueItem[]> {
@@ -178,8 +178,8 @@ export async function fetchLeagueEvents(
   league: string,
   from: Date,
   to: Date,
-  includeInPlay = true,
-  inPlayLookbackHours = 6,
+  includeInPlay = false,
+  inPlayLookbackHours = 2,
   limit = 100,
   offset = 0
 ): Promise<EventItem[]> {
@@ -234,8 +234,8 @@ export async function fetchEventTimeseries(
 export async function fetchBookRiskFocusEvents(
   from: Date,
   to: Date,
-  includeInPlay = true,
-  inPlayLookbackHours = 6,
+  includeInPlay = false,
+  inPlayLookbackHours = 2,
   requireBookRisk = true,
   limit = 500,
   offset = 0

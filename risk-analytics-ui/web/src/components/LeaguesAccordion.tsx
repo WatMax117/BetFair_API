@@ -6,7 +6,11 @@ import Typography from '@mui/material/Typography'
 import TextField from '@mui/material/TextField'
 import Button from '@mui/material/Button'
 import Box from '@mui/material/Box'
+import FormControl from '@mui/material/FormControl'
 import FormControlLabel from '@mui/material/FormControlLabel'
+import InputLabel from '@mui/material/InputLabel'
+import MenuItem from '@mui/material/MenuItem'
+import Select from '@mui/material/Select'
 import Switch from '@mui/material/Switch'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import SearchIcon from '@mui/icons-material/Search'
@@ -15,25 +19,36 @@ import { SortedEventsList, loadSortState, type SortState } from './SortedEventsL
 import { fetchLeagues, fetchLeagueEvents, fetchBookRiskFocusEvents } from '../api'
 import type { LeagueItem, EventItem } from '../api'
 
-const DEFAULT_WINDOW_HOURS = 24
-const DEFAULT_IN_PLAY_LOOKBACK_HOURS = 6
+/** Event filter mode: upcoming only, live + upcoming, or all (last 48h + next 48h). */
+export type EventFilterMode = 'upcoming' | 'live_and_upcoming' | 'all'
 
-function getWindowDates(hours: number): { from: Date; to: Date } {
+function getFilterWindow(mode: EventFilterMode): { from: Date; to: Date; includeInPlay: boolean; inPlayLookbackHours: number } {
   const now = new Date()
-  const ms = hours * 60 * 60 * 1000
-  const from = new Date(now.getTime() - ms)
-  const to = new Date(now.getTime() + ms)
-  return { from, to }
+  const h = 60 * 60 * 1000
+  switch (mode) {
+    case 'upcoming':
+      return { from: now, to: new Date(now.getTime() + 48 * h), includeInPlay: false, inPlayLookbackHours: 0 }
+    case 'live_and_upcoming':
+      return { from: new Date(now.getTime() - 2 * h), to: new Date(now.getTime() + 48 * h), includeInPlay: true, inPlayLookbackHours: 2 }
+    case 'all':
+      return { from: new Date(now.getTime() - 48 * h), to: new Date(now.getTime() + 48 * h), includeInPlay: true, inPlayLookbackHours: 48 }
+    default:
+      return getFilterWindow('upcoming')
+  }
+}
+
+const FILTER_MODE_LABELS: Record<EventFilterMode, string> = {
+  upcoming: 'Upcoming',
+  'live_and_upcoming': 'Live + Upcoming',
+  all: 'All (last 48h + next 48h)',
 }
 
 const DEFAULT_LIMIT = 100
 
 export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventItem) => void }) {
-  const [windowHours, setWindowHours] = useState(DEFAULT_WINDOW_HOURS)
+  const [eventFilterMode, setEventFilterMode] = useState<EventFilterMode>('upcoming')
   const [search, setSearch] = useState('')
   const [searchApplied, setSearchApplied] = useState<string | null>(null)
-  const [includeInPlay, setIncludeInPlay] = useState(true)
-  const [inPlayLookbackHours, setInPlayLookbackHours] = useState(DEFAULT_IN_PLAY_LOOKBACK_HOURS)
   const [leagues, setLeagues] = useState<LeagueItem[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -48,7 +63,7 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
   const [onlyActiveInPlay, setOnlyActiveInPlay] = useState(true)
   const [onlyMarketsWithBookRisk, setOnlyMarketsWithBookRisk] = useState(true)
 
-  const { from, to } = useMemo(() => getWindowDates(windowHours), [windowHours])
+  const { from, to, includeInPlay, inPlayLookbackHours } = useMemo(() => getFilterWindow(eventFilterMode), [eventFilterMode])
 
   const loadLeaguesRequestIdRef = useRef(0)
 
@@ -85,7 +100,7 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
         setLoading(false)
       }
     }
-  }, [from.getTime(), to.getTime(), searchApplied, includeInPlay, inPlayLookbackHours, refreshTrigger])
+  }, [from.getTime(), to.getTime(), searchApplied, eventFilterMode, refreshTrigger])
 
   const handleSearch = useCallback(() => {
     setSearchApplied(search.trim() || '')
@@ -177,45 +192,28 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
       </Typography>
 
       <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, mb: 2, alignItems: 'center' }}>
-        <TextField
-          size="small"
-          label="Time window (hours back and forward from now)"
-          type="number"
-          value={windowHours}
-          onChange={(e) => setWindowHours(Number(e.target.value) || 24)}
-          inputProps={{ min: 1, max: 168 }}
-          sx={{ width: 200 }}
-          InputLabelProps={{
-            sx: {
-              whiteSpace: 'normal',
-              overflow: 'visible',
-              textOverflow: 'unset',
-              maxWidth: '100%',
-              lineHeight: 1.2,
-            },
-          }}
-        />
-        <FormControlLabel
-          control={
-            <Switch
-              checked={includeInPlay}
-              onChange={(e) => setIncludeInPlay(e.target.checked)}
-              color="primary"
-            />
-          }
-          label="Include in-play events"
-        />
-        {includeInPlay && (
-          <TextField
-            size="small"
-            label="In-play lookback (hours)"
-            type="number"
-            value={inPlayLookbackHours}
-            onChange={(e) => setInPlayLookbackHours(Number(e.target.value) || 0)}
-            inputProps={{ min: 0, max: 168, step: 0.5 }}
-            sx={{ width: 140 }}
-          />
-        )}
+        <FormControl size="small" sx={{ minWidth: 220 }}>
+          <InputLabel id="event-filter-label">Events</InputLabel>
+          <Select
+            labelId="event-filter-label"
+            id="event-filter-mode"
+            value={eventFilterMode}
+            label="Events"
+            onChange={(e) => {
+              setEventFilterMode(e.target.value as EventFilterMode)
+              setEventsByLeague({})
+            }}
+          >
+            <MenuItem value="upcoming">{FILTER_MODE_LABELS.upcoming}</MenuItem>
+            <MenuItem value="live_and_upcoming">{FILTER_MODE_LABELS.live_and_upcoming}</MenuItem>
+            <MenuItem value="all">{FILTER_MODE_LABELS.all}</MenuItem>
+          </Select>
+        </FormControl>
+        <Typography variant="body2" color="text.secondary" sx={{ alignSelf: 'center' }}>
+          {eventFilterMode === 'upcoming' && 'Showing upcoming events'}
+          {eventFilterMode === 'live_and_upcoming' && 'Showing live + upcoming'}
+          {eventFilterMode === 'all' && 'Showing last 48h + next 48h'}
+        </Typography>
         <TextField
           size="small"
           label="Search (team / event)"
@@ -259,7 +257,7 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
         <Typography color="text.secondary">Loading leagues…</Typography>
       ) : !Array.isArray(leagues) || leagues.length === 0 ? (
         <Typography color="text.secondary" component="span" sx={{ display: 'block' }}>
-          No leagues in the selected window. Queried {from.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })} – {to.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}. Try a larger time window (e.g. 168 hours) or a different search.
+          No leagues in the selected window. Queried {from.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })} – {to.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })}. Try the All filter to include past events or a different search.
         </Typography>
       ) : (
         <>
