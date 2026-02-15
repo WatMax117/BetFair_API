@@ -1,0 +1,23 @@
+# Risk Debug View – Apache vhost
+# Serves post-apache/ and proxies /api/ to risk-analytics-ui-api (port 8000).
+#
+# Port: 80 (HTTP default). Bind: * = all interfaces; use 127.0.0.1 for local-only.
+# Enable: see README.md for exact commands.
+# Path: Replace /path/to/NetBet with your project root (e.g. C:/Users/You/NetBet on Windows).
+
+<VirtualHost *:80>
+    DocumentRoot /path/to/NetBet/post-apache
+    <Directory /path/to/NetBet/post-apache>
+        Require all granted
+        Options -Indexes
+        DirectoryIndex index.html
+    </Directory>
+
+    # Proxy /api/* to Risk Analytics API (Docker or local)
+    ProxyPreserveHost On
+    ProxyPass        /api/  http://127.0.0.1:8000/
+    ProxyPassReverse /api/  http://127.0.0.1:8000/
+
+    ErrorLog ${APACHE_LOG_DIR}/post-apache-debug-error.log
+    CustomLog ${APACHE_LOG_DIR}/post-apache-debug-access.log combined
+</VirtualHost>

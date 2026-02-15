@@ -13,9 +13,6 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Any, Literal
 from urllib.parse import unquote
 
-# Default for includeImpedance: query param ?includeImpedance=true or env INCLUDE_IMPEDANCE_DEFAULT=true
-INCLUDE_IMPEDANCE_DEFAULT = os.environ.get("INCLUDE_IMPEDANCE_DEFAULT", "").lower() in ("1", "true", "yes")
-
 logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, Query, HTTPException, Response
@@ -63,24 +60,6 @@ def _opt_float(val: Any) -> Optional[float]:
         return float(val)
     except (TypeError, ValueError):
         return None
-
-
-def _impedance_inputs_from_row(r: Any, prefix: Literal["home", "away", "draw"]) -> dict:
-    """Build impedance raw inputs from row. backProfit = backer's potential profit if back wins = (backOdds-1)*backStake. layLiability = layer's max loss/exposure if selection wins = (layOdds-1)*layStake."""
-    back_stake = _opt_float(r.get(prefix + "_back_stake"))
-    back_odds = _opt_float(r.get(prefix + "_back_odds"))
-    lay_stake = _opt_float(r.get(prefix + "_lay_stake"))
-    lay_odds = _opt_float(r.get(prefix + "_lay_odds"))
-    back_profit = (back_odds - 1.0) * back_stake if back_odds is not None and back_stake is not None else None
-    lay_liability = (lay_odds - 1.0) * lay_stake if lay_odds is not None and lay_stake is not None else None
-    return {
-        "backStake": back_stake,
-        "backOdds": back_odds,
-        "backProfit": back_profit,
-        "layStake": lay_stake,
-        "layOdds": lay_odds,
-        "layLiability": lay_liability,
-    }
 
 
 def _price_size(level: Any) -> tuple[float, float]:
@@ -310,12 +289,10 @@ def get_league_events(
     to_ts: Optional[str] = Query(None),
     include_in_play: bool = Query(True, description="Include in-play events"),
     in_play_lookback_hours: float = Query(6.0, ge=0, le=168),
-    include_impedance: bool = Query(INCLUDE_IMPEDANCE_DEFAULT, description="Include impedance/impedanceNorm (H/A/D) in response"),
-    include_impedance_inputs: bool = Query(True, description="When include_impedance true, also return raw inputs (backStake, backOdds, backProfit, layStake, layOdds, layLiability) per outcome"),
     limit: int = Query(100, ge=1, le=200, description="Max events to return"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
 ):
-    """Events in the league with latest snapshot (odds + Imbalance index + total_volume). Optionally impedance (H/A/D)."""
+    """Events in the league with latest snapshot (odds + total_volume). Imbalance and Impedance indices removed (MVP simplification)."""
     league_decoded = unquote(league_name)
     now = datetime.now(timezone.utc)
     from_dt = _parse_ts(from_ts, now)
@@ -326,13 +303,6 @@ def get_league_events(
     else:
         from_effective = from_dt
 
-    _imp_base = ", d.home_impedance, d.away_impedance, d.draw_impedance, d.home_impedance_norm, d.away_impedance_norm, d.draw_impedance_norm"
-    _imp_inputs = ", d.home_back_stake, d.home_back_odds, d.home_lay_stake, d.home_lay_odds, d.away_back_stake, d.away_back_odds, d.away_lay_stake, d.away_lay_odds, d.draw_back_stake, d.draw_back_odds, d.draw_lay_stake, d.draw_lay_odds" if include_impedance_inputs else ""
-    impedance_cols = (_imp_base + _imp_inputs) if include_impedance else ""
-    _sel_base = ", l.home_impedance, l.away_impedance, l.draw_impedance, l.home_impedance_norm, l.away_impedance_norm, l.draw_impedance_norm"
-    _sel_inputs = ", l.home_back_stake, l.home_back_odds, l.home_lay_stake, l.home_lay_odds, l.away_back_stake, l.away_back_odds, l.away_lay_stake, l.away_lay_odds, l.draw_back_stake, l.draw_back_odds, l.draw_lay_stake, l.draw_lay_odds" if include_impedance_inputs else ""
-    impedance_select = (_sel_base + _sel_inputs) if include_impedance else ""
-
     with cursor() as cur:
         cur.execute(
             """
@@ -341,13 +311,12 @@ def get_league_events(
                     d.market_id,
                     d.snapshot_id,
                     d.snapshot_at,
-                    d.home_risk, d.away_risk, d.draw_risk,
                     d.home_best_back, d.away_best_back, d.draw_best_back,
                     d.home_best_lay, d.away_best_lay, d.draw_best_lay,
                     d.total_volume,
                     d.depth_limit,
-                    d.calculation_version
-                    """ + impedance_cols + """
+                    d.calculation_version,
+                    d.home_book_risk_l3, d.away_book_risk_l3, d.draw_book_risk_l3
                 FROM market_derived_metrics d
                 ORDER BY d.market_id, d.snapshot_at DESC
             )
@@ -358,13 +327,12 @@ def get_league_events(
                 e.event_open_date,
                 e.competition_name,
                 l.snapshot_at AS latest_snapshot_at,
-                l.home_risk, l.away_risk, l.draw_risk,
                 l.home_best_back, l.away_best_back, l.draw_best_back,
                 l.home_best_lay, l.away_best_lay, l.draw_best_lay,
                 l.total_volume,
                 l.depth_limit,
-                l.calculation_version
-                """ + impedance_select + """
+                l.calculation_version,
+                l.home_book_risk_l3, l.away_book_risk_l3, l.draw_book_risk_l3
             FROM market_event_metadata e
             JOIN latest l ON l.market_id = e.market_id
             WHERE e.competition_name = %s
@@ -379,21 +347,13 @@ def get_league_events(
         rows = cur.fetchall()
 
     def _row_to_event(r: Any) -> dict:
-        out = {
+        return {
             "market_id": r["market_id"],
             "event_id": r.get("event_id"),
             "event_name": r["event_name"],
             "event_open_date": r["event_open_date"].isoformat() if r.get("event_open_date") else None,
             "competition_name": r["competition_name"],
             "latest_snapshot_at": r["latest_snapshot_at"].isoformat() if r.get("latest_snapshot_at") else None,
-            "home_risk": float(r["home_risk"]) if r.get("home_risk") is not None else None,
-            "away_risk": float(r["away_risk"]) if r.get("away_risk") is not None else None,
-            "draw_risk": float(r["draw_risk"]) if r.get("draw_risk") is not None else None,
-            "imbalance": {
-                "home": _opt_float(r.get("home_risk")),
-                "away": _opt_float(r.get("away_risk")),
-                "draw": _opt_float(r.get("draw_risk")),
-            },
             "home_best_back": float(r["home_best_back"]) if r.get("home_best_back") is not None else None,
             "away_best_back": float(r["away_best_back"]) if r.get("away_best_back") is not None else None,
             "draw_best_back": float(r["draw_best_back"]) if r.get("draw_best_back") is not None else None,
@@ -403,25 +363,10 @@ def get_league_events(
             "total_volume": float(r["total_volume"]) if r.get("total_volume") is not None else None,
             "depth_limit": r.get("depth_limit"),
             "calculation_version": r.get("calculation_version"),
+            "home_book_risk_l3": _opt_float(r.get("home_book_risk_l3")),
+            "away_book_risk_l3": _opt_float(r.get("away_book_risk_l3")),
+            "draw_book_risk_l3": _opt_float(r.get("draw_book_risk_l3")),
         }
-        if include_impedance and "home_impedance" in r:
-            out["impedance"] = {
-                "home": _opt_float(r.get("home_impedance")),
-                "away": _opt_float(r.get("away_impedance")),
-                "draw": _opt_float(r.get("draw_impedance")),
-            }
-            out["impedanceNorm"] = {
-                "home": _opt_float(r.get("home_impedance_norm")),
-                "away": _opt_float(r.get("away_impedance_norm")),
-                "draw": _opt_float(r.get("draw_impedance_norm")),
-            }
-            if include_impedance_inputs:
-                out["impedanceInputs"] = {
-                    "home": _impedance_inputs_from_row(r, "home"),
-                    "away": _impedance_inputs_from_row(r, "away"),
-                    "draw": _impedance_inputs_from_row(r, "draw"),
-                }
-        return out
 
     return [_row_to_event(r) for r in rows]
 
@@ -432,13 +377,11 @@ def get_book_risk_focus_events(
     to_ts: Optional[str] = Query(None),
     include_in_play: bool = Query(True, description="Include in-play events"),
     in_play_lookback_hours: float = Query(6.0, ge=0, le=168),
-    include_impedance: bool = Query(True, description="Include impedance per outcome"),
-    include_impedance_inputs: bool = Query(False, description="Include raw impedance inputs"),
     require_book_risk: bool = Query(True, description="Only return rows where all three book_risk_l3 are non-NULL"),
     limit: int = Query(500, ge=1, le=1000),
     offset: int = Query(0, ge=0),
 ):
-    """All events in the time window with latest metrics including Book Risk L3. Same time filter logic as leagues."""
+    """All events in the time window with latest metrics including Book Risk L3. Imbalance/Impedance removed (MVP)."""
     now = datetime.now(timezone.utc)
     from_dt = _parse_ts(from_ts, now)
     to_dt = _parse_ts(to_ts, now + timedelta(hours=24))
@@ -448,15 +391,6 @@ def get_book_risk_focus_events(
     else:
         from_effective = from_dt
 
-    _imp_base = ", d.home_impedance, d.away_impedance, d.draw_impedance, d.home_impedance_norm, d.away_impedance_norm, d.draw_impedance_norm"
-    _imp_inputs = ", d.home_back_stake, d.home_back_odds, d.home_lay_stake, d.home_lay_odds, d.away_back_stake, d.away_back_odds, d.away_lay_stake, d.away_lay_odds, d.draw_back_stake, d.draw_back_odds, d.draw_lay_stake, d.draw_lay_odds" if include_impedance_inputs else ""
-    impedance_cols = (_imp_base + _imp_inputs) if include_impedance else ""
-    impedance_select = ""
-    if include_impedance:
-        impedance_select = ", l.home_impedance, l.away_impedance, l.draw_impedance, l.home_impedance_norm, l.away_impedance_norm, l.draw_impedance_norm"
-        if include_impedance_inputs:
-            impedance_select += ", l.home_back_stake, l.home_back_odds, l.home_lay_stake, l.home_lay_odds, l.away_back_stake, l.away_back_odds, l.away_lay_stake, l.away_lay_odds, l.draw_back_stake, l.draw_back_odds, l.draw_lay_stake, l.draw_lay_odds"
-
     with cursor() as cur:
         cur.execute(
             """
@@ -465,14 +399,12 @@ def get_book_risk_focus_events(
                     d.market_id,
                     d.snapshot_id,
                     d.snapshot_at,
-                    d.home_risk, d.away_risk, d.draw_risk,
                     d.home_book_risk_l3, d.away_book_risk_l3, d.draw_book_risk_l3,
                     d.home_best_back, d.away_best_back, d.draw_best_back,
                     d.home_best_lay, d.away_best_lay, d.draw_best_lay,
                     d.total_volume,
                     d.depth_limit,
                     d.calculation_version
-                    """ + impedance_cols + """
                 FROM market_derived_metrics d
                 ORDER BY d.market_id, d.snapshot_at DESC
             )
@@ -483,14 +415,12 @@ def get_book_risk_focus_events(
                 e.event_open_date,
                 e.competition_name,
                 l.snapshot_at AS latest_snapshot_at,
-                l.home_risk, l.away_risk, l.draw_risk,
                 l.home_book_risk_l3, l.away_book_risk_l3, l.draw_book_risk_l3,
                 l.home_best_back, l.away_best_back, l.draw_best_back,
                 l.home_best_lay, l.away_best_lay, l.draw_best_lay,
                 l.total_volume,
                 l.depth_limit,
                 l.calculation_version
-                """ + impedance_select + """
             FROM market_event_metadata e
             JOIN latest l ON l.market_id = e.market_id
             WHERE e.event_open_date IS NOT NULL
@@ -505,24 +435,16 @@ def get_book_risk_focus_events(
         rows = cur.fetchall()
 
     def _row_to_event(r: Any) -> dict:
-        out = {
+        return {
             "market_id": r["market_id"],
             "event_id": r.get("event_id"),
             "event_name": r["event_name"],
             "event_open_date": r["event_open_date"].isoformat() if r.get("event_open_date") else None,
             "competition_name": r["competition_name"],
             "latest_snapshot_at": r["latest_snapshot_at"].isoformat() if r.get("latest_snapshot_at") else None,
-            "home_risk": float(r["home_risk"]) if r.get("home_risk") is not None else None,
-            "away_risk": float(r["away_risk"]) if r.get("away_risk") is not None else None,
-            "draw_risk": float(r["draw_risk"]) if r.get("draw_risk") is not None else None,
             "home_book_risk_l3": _opt_float(r.get("home_book_risk_l3")),
             "away_book_risk_l3": _opt_float(r.get("away_book_risk_l3")),
             "draw_book_risk_l3": _opt_float(r.get("draw_book_risk_l3")),
-            "imbalance": {
-                "home": _opt_float(r.get("home_risk")),
-                "away": _opt_float(r.get("away_risk")),
-                "draw": _opt_float(r.get("draw_risk")),
-            },
             "home_best_back": float(r["home_best_back"]) if r.get("home_best_back") is not None else None,
             "away_best_back": float(r["away_best_back"]) if r.get("away_best_back") is not None else None,
             "draw_best_back": float(r["draw_best_back"]) if r.get("draw_best_back") is not None else None,
@@ -533,24 +455,6 @@ def get_book_risk_focus_events(
             "depth_limit": r.get("depth_limit"),
             "calculation_version": r.get("calculation_version"),
         }
-        if include_impedance and "home_impedance" in r:
-            out["impedance"] = {
-                "home": _opt_float(r.get("home_impedance")),
-                "away": _opt_float(r.get("away_impedance")),
-                "draw": _opt_float(r.get("draw_impedance")),
-            }
-            out["impedanceNorm"] = {
-                "home": _opt_float(r.get("home_impedance_norm")),
-                "away": _opt_float(r.get("away_impedance_norm")),
-                "draw": _opt_float(r.get("draw_impedance_norm")),
-            }
-            if include_impedance_inputs:
-                out["impedanceInputs"] = {
-                    "home": _impedance_inputs_from_row(r, "home"),
-                    "away": _impedance_inputs_from_row(r, "away"),
-                    "draw": _impedance_inputs_from_row(r, "draw"),
-                }
-        return out
 
     return [_row_to_event(r) for r in rows]
 
@@ -561,22 +465,15 @@ def get_event_timeseries(
     from_ts: Optional[str] = Query(None),
     to_ts: Optional[str] = Query(None),
     interval_minutes: int = Query(15, ge=1, le=60),
-    include_impedance: bool = Query(INCLUDE_IMPEDANCE_DEFAULT, description="Include impedance/impedanceNorm (H/A/D) per point"),
-    include_impedance_inputs: bool = Query(True, description="When include_impedance true, also return raw inputs per point"),
 ):
     """
     Time series for one event: 15-min buckets, latest point per bucket.
-    Returns snapshot_at, best_back (home/away/draw), best_lay, risks (Imbalance), total_volume. Optionally impedance/impedanceNorm and impedanceInputs.
+    Returns snapshot_at, best_back, best_lay, book_risk_l3, total_volume. Imbalance/Impedance removed (MVP).
     """
     now = datetime.now(timezone.utc)
     to_dt = _parse_ts(to_ts, now)
     from_dt = _parse_ts(from_ts, now - timedelta(hours=24))
     interval_sec = interval_minutes * 60
-
-    _imp_base = ", home_impedance, away_impedance, draw_impedance, home_impedance_norm, away_impedance_norm, draw_impedance_norm"
-    _imp_inp = ", home_back_stake, home_back_odds, home_lay_stake, home_lay_odds, away_back_stake, away_back_odds, away_lay_stake, away_lay_odds, draw_back_stake, draw_back_odds, draw_lay_stake, draw_lay_odds" if include_impedance_inputs else ""
-    imp_cols = (_imp_base + _imp_inp) if include_impedance else ""
-    imp_select = imp_cols  # same columns in SELECT
     _l1_size_cols = ", home_best_back_size_l1, away_best_back_size_l1, draw_best_back_size_l1, home_best_lay_size_l1, away_best_lay_size_l1, draw_best_lay_size_l1"
     _l2_l3_cols = ", home_back_odds_l2, home_back_size_l2, home_back_odds_l3, home_back_size_l3, away_back_odds_l2, away_back_size_l2, away_back_odds_l3, away_back_size_l3, draw_back_odds_l2, draw_back_size_l2, draw_back_odds_l3, draw_back_size_l3"
 
@@ -589,14 +486,12 @@ def get_event_timeseries(
                     snapshot_at,
                     home_best_back, away_best_back, draw_best_back,
                     home_best_lay, away_best_lay, draw_best_lay,
-                    home_risk, away_risk, draw_risk,
                     home_book_risk_l3, away_book_risk_l3, draw_book_risk_l3,
                     total_volume,
                     depth_limit,
                     calculation_version
                     """ + _l1_size_cols + """
                     """ + _l2_l3_cols + """
-                    """ + imp_cols + """
                 FROM market_derived_metrics
                 WHERE market_id = %s
                   AND snapshot_at >= %s
@@ -608,14 +503,12 @@ def get_event_timeseries(
                     snapshot_at,
                     home_best_back, away_best_back, draw_best_back,
                     home_best_lay, away_best_lay, draw_best_lay,
-                    home_risk, away_risk, draw_risk,
                     home_book_risk_l3, away_book_risk_l3, draw_book_risk_l3,
                     total_volume,
                     depth_limit,
                     calculation_version
                     """ + _l1_size_cols + """
                     """ + _l2_l3_cols + """
-                    """ + imp_select + """
                 FROM bucketed
                 ORDER BY bucket_epoch, snapshot_at DESC
             )
@@ -623,14 +516,12 @@ def get_event_timeseries(
                 snapshot_at,
                 home_best_back, away_best_back, draw_best_back,
                 home_best_lay, away_best_lay, draw_best_lay,
-                home_risk, away_risk, draw_risk,
                 home_book_risk_l3, away_book_risk_l3, draw_book_risk_l3,
                 total_volume,
                 depth_limit,
                 calculation_version
                 """ + _l1_size_cols + """
                 """ + _l2_l3_cols + """
-                """ + imp_select + """
             FROM latest_in_bucket
             ORDER BY snapshot_at ASC
             """,
@@ -639,7 +530,7 @@ def get_event_timeseries(
         rows = cur.fetchall()
 
     def _serialize(r: Any) -> dict:
-        out = {
+        return {
             "snapshot_at": r["snapshot_at"].isoformat() if r.get("snapshot_at") else None,
             "home_best_back": float(r["home_best_back"]) if r.get("home_best_back") is not None else None,
             "away_best_back": float(r["away_best_back"]) if r.get("away_best_back") is not None else None,
@@ -647,14 +538,6 @@ def get_event_timeseries(
             "home_best_lay": float(r["home_best_lay"]) if r.get("home_best_lay") is not None else None,
             "away_best_lay": float(r["away_best_lay"]) if r.get("away_best_lay") is not None else None,
             "draw_best_lay": float(r["draw_best_lay"]) if r.get("draw_best_lay") is not None else None,
-            "home_risk": float(r["home_risk"]) if r.get("home_risk") is not None else None,
-            "away_risk": float(r["away_risk"]) if r.get("away_risk") is not None else None,
-            "draw_risk": float(r["draw_risk"]) if r.get("draw_risk") is not None else None,
-            "imbalance": {
-                "home": _opt_float(r.get("home_risk")),
-                "away": _opt_float(r.get("away_risk")),
-                "draw": _opt_float(r.get("draw_risk")),
-            },
             "home_book_risk_l3": _opt_float(r.get("home_book_risk_l3")),
             "away_book_risk_l3": _opt_float(r.get("away_book_risk_l3")),
             "draw_book_risk_l3": _opt_float(r.get("draw_book_risk_l3")),
@@ -680,24 +563,6 @@ def get_event_timeseries(
             "draw_back_odds_l3": _opt_float(r.get("draw_back_odds_l3")),
             "draw_back_size_l3": _opt_float(r.get("draw_back_size_l3")),
         }
-        if include_impedance and "home_impedance" in r:
-            out["impedance"] = {
-                "home": _opt_float(r.get("home_impedance")),
-                "away": _opt_float(r.get("away_impedance")),
-                "draw": _opt_float(r.get("draw_impedance")),
-            }
-            out["impedanceNorm"] = {
-                "home": _opt_float(r.get("home_impedance_norm")),
-                "away": _opt_float(r.get("away_impedance_norm")),
-                "draw": _opt_float(r.get("draw_impedance_norm")),
-            }
-            if include_impedance_inputs:
-                out["impedanceInputs"] = {
-                    "home": _impedance_inputs_from_row(r, "home"),
-                    "away": _impedance_inputs_from_row(r, "away"),
-                    "draw": _impedance_inputs_from_row(r, "draw"),
-                }
-        return out
 
     return [_serialize(r) for r in rows]
 
@@ -861,15 +726,12 @@ def get_market_snapshots(
                 m.depth_limit AS mbs_depth_limit,
                 m.source AS mbs_source,
                 m.capture_version AS mbs_capture_version,
-                d.home_risk, d.away_risk, d.draw_risk,
                 d.total_volume AS mdm_total_volume,
                 d.home_best_back, d.away_best_back, d.draw_best_back,
                 d.home_best_lay, d.away_best_lay, d.draw_best_lay,
                 d.home_spread, d.away_spread, d.draw_spread,
                 d.depth_limit AS mdm_depth_limit,
                 d.calculation_version AS mdm_calculation_version,
-                d.home_impedance, d.away_impedance, d.draw_impedance,
-                d.home_impedance_norm, d.away_impedance_norm, d.draw_impedance_norm,
                 d.home_book_risk_l3, d.away_book_risk_l3, d.draw_book_risk_l3,
                 d.home_best_back_size_l1, d.away_best_back_size_l1, d.draw_best_back_size_l1,
                 d.home_back_odds_l2, d.home_back_size_l2, d.home_back_odds_l3, d.home_back_size_l3,

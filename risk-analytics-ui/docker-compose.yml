@@ -12,8 +12,9 @@ services:
       POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
       POSTGRES_DB: ${POSTGRES_DB:-netbet}
-      POSTGRES_USER: ${POSTGRES_USER:-netbet}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-netbet}
+      POSTGRES_USER: ${POSTGRES_ANALYTICS_READER_USER:-netbet_analytics_reader}
+      POSTGRES_PASSWORD: ${POSTGRES_ANALYTICS_READER_PASSWORD}
+      PGOPTIONS: -c search_path=analytics
     ports:
       - "8000:8000"
     restart: unless-stopped

@@ -1,13 +1,11 @@
 -- Layer 2: Derived metrics (computed from Layer 1 raw + metadata mapping).
 -- Depends on market_book_snapshots. Run after create_market_book_snapshots.sql.
 
+-- Imbalance and Impedance indices removed (MVP simplification).
 CREATE TABLE IF NOT EXISTS market_derived_metrics (
     snapshot_id BIGINT PRIMARY KEY REFERENCES market_book_snapshots(snapshot_id) ON DELETE CASCADE,
     snapshot_at TIMESTAMPTZ NOT NULL,
     market_id TEXT NOT NULL,
-    home_risk DOUBLE PRECISION NOT NULL,
-    away_risk DOUBLE PRECISION NOT NULL,
-    draw_risk DOUBLE PRECISION NOT NULL,
     total_volume DOUBLE PRECISION NOT NULL,
     home_best_back DOUBLE PRECISION NULL,
     away_best_back DOUBLE PRECISION NULL,

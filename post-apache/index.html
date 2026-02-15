@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Risk Debug View</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 1rem 2rem; max-width: 1400px; }
+    h1 { font-size: 1.25rem; margin-bottom: 0.5rem; }
+    .subtitle { color: #666; font-size: 0.875rem; margin-bottom: 1rem; }
+    .filters { display: flex; flex-wrap: wrap; gap: 1rem; align-items: center; margin-bottom: 1rem; }
+    .filters label { display: flex; align-items: center; gap: 0.5rem; }
+    .filters input[type="number"], .filters input[type="text"] { width: 100px; padding: 0.25rem; }
+    button { padding: 0.4rem 0.8rem; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .league-item { border: 1px solid #ddd; margin-bottom: 0.5rem; border-radius: 4px; overflow: hidden; }
+    .league-header { padding: 0.5rem 1rem; background: #f5f5f5; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+    .league-header:hover { background: #eee; }
+    .league-content { padding: 1rem; border-top: 1px solid #eee; }
+    .event-item { padding: 0.5rem; border: 1px solid #eee; margin-bottom: 0.5rem; border-radius: 4px; cursor: pointer; }
+    .event-item:hover { background: #f9f9f9; }
+    .event-item.selected { background: #e3f2fd; border-color: #2196f3; }
+    .market-item { padding: 0.4rem; margin-bottom: 0.25rem; border-radius: 4px; cursor: pointer; border: 1px solid #e0e0e0; }
+    .market-item:hover { background: #f5f5f5; }
+    .market-item.selected { background: #e8f5e9; border-color: #4caf50; }
+    .eventDetail { margin-top: 1rem; }
+    .eventDetail h3 { margin-bottom: 0.5rem; font-size: 1rem; }
+    .eventDetail .markets-list { margin-bottom: 1rem; }
+    .snapshots-wrap { margin-top: 0.5rem; }
+    .snapshots { overflow-x: auto; max-width: 100%; }
+    .snapshots table { width: 100%; border-collapse: collapse; font-size: 0.75rem; }
+    .snapshots th, .snapshots td { padding: 0.35rem; text-align: left; border: 1px solid #eee; white-space: nowrap; }
+    .snapshots th { background: #f5f5f5; position: sticky; top: 0; z-index: 2; }
+    .snapshots th:first-child, .snapshots td:first-child { position: sticky; left: 0; background: #fff; z-index: 1; box-shadow: 1px 0 0 #eee; }
+    .snapshots th:first-child { background: #f5f5f5; z-index: 3; }
+    .snapshots tr.clickable { cursor: pointer; }
+    .snapshots tr.clickable:hover { background: #f0f7ff; }
+    .snapshots tr.clickable:hover td:first-child { background: #f0f7ff; }
+    .snapshots .col-visibility { margin-bottom: 0.5rem; font-size: 0.8rem; }
+    .snapshots .col-visibility summary { cursor: pointer; user-select: none; }
+    .snapshots .col-visibility ul { list-style: none; padding: 0; margin: 0.25rem 0 0 0; max-height: 120px; overflow-y: auto; display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; }
+    .snapshots .col-visibility li { display: flex; align-items: center; gap: 0.25rem; }
+    .snapshots .col-visibility input { margin: 0; }
+    .snapshots th.hide-col, .snapshots td.hide-col { display: none; }
+    .modal { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+    .modal-content { background: #fff; padding: 1rem; max-width: 90vw; max-height: 80vh; overflow: auto; border-radius: 8px; }
+    .modal-content pre { font-size: 0.7rem; overflow: auto; }
+    .modal-close { float: right; cursor: pointer; font-size: 1.25rem; }
+    .loading { color: #888; font-style: italic; }
+    .error { color: #c62828; }
+  </style>
+</head>
+<body>
+  <h1>Risk Debug View</h1>
+  <p class="subtitle">Read-only debug inspector for 15‑min snapshots. Lazy-loaded: leagues → events → markets → timeseries table (snapshots over time, auto-generated scalar columns). raw_payload on row click.</p>
+
+  <div class="filters">
+    <label>Window (h): <input type="number" id="windowHours" value="24" min="1" max="168" title="Max 168 (7d)"></label>
+    <label>Search: <input type="text" id="search" placeholder="optional"></label>
+    <button id="btnSearch">Search</button>
+    <span id="status"></span>
+  </div>
+
+  <div id="leagues"></div>
+  <div id="eventDetail"></div>
+
+  <script>
+    (function () {
+      const API_BASE = (() => {
+        const u = new URL(window.location.href);
+        return u.searchParams.get('api') || '/api';
+      })();
+      const SNAPSHOT_LIMIT = 500;
+      const MAX_WINDOW_H = 168;
+
+      const now = () => new Date();
+      const toISO = d => d.toISOString();
+
+      function setStatus(msg, isError) {
+        const el = document.getElementById('status');
+        el.textContent = msg;
+        el.className = isError ? 'error' : '';
+      }
+
+      function fetchJSON(url) {
+        return fetch(url).then(r => {
+          if (!r.ok) throw new Error(r.statusText);
+          return r.json();
+        });
+      }
+
+      function loadLeagues() {
+        const windowHours = Math.min(parseInt(document.getElementById('windowHours').value, 10) || 24, MAX_WINDOW_H);
+        const search = document.getElementById('search').value.trim();
+        const from = now();
+        const to = new Date(from.getTime() + windowHours * 3600000);
+        const params = new URLSearchParams({
+          from_ts: toISO(from),
+          to_ts: toISO(to),
+          include_in_play: 'true',
+          in_play_lookback_hours: '6',
+          limit: '100',
+          offset: '0'
+        });
+        if (search) params.set('q', search);
+        setStatus('Loading leagues…');
+        return fetchJSON(`${API_BASE}/leagues?${params}`)
+          .then(data => { setStatus(''); return data; })
+          .catch(err => { setStatus('Failed: ' + err.message, true); return []; });
+      }
+
+      function loadEvents(league) {
+        const windowHours = Math.min(parseInt(document.getElementById('windowHours').value, 10) || 24, MAX_WINDOW_H);
+        const from = now();
+        const to = new Date(from.getTime() + windowHours * 3600000);
+        const params = new URLSearchParams({
+          from_ts: toISO(from),
+          to_ts: toISO(to),
+          include_in_play: 'true',
+          in_play_lookback_hours: '6',
+          limit: '100',
+          offset: '0'
+        });
+        return fetchJSON(`${API_BASE}/leagues/${encodeURIComponent(league)}/events?${params}`);
+      }
+
+      function loadMarkets(marketId) {
+        return fetchJSON(`${API_BASE}/debug/events/${encodeURIComponent(marketId)}/markets`);
+      }
+
+      function loadSnapshots(marketId, windowHours) {
+        const to = now();
+        const from = new Date(to.getTime() - Math.min(windowHours, MAX_WINDOW_H) * 3600000);
+        const params = new URLSearchParams({
+          from_ts: toISO(from),
+          to_ts: toISO(to),
+          limit: String(SNAPSHOT_LIMIT)
+        });
+        return fetchJSON(`${API_BASE}/debug/markets/${encodeURIComponent(marketId)}/snapshots?${params}`);
+      }
+
+      // Only called on explicit row click (showRawModal). Never prefetch or call on load/search/expand.
+      function loadRaw(snapshotId) {
+        return fetchJSON(`${API_BASE}/debug/snapshots/${snapshotId}/raw`);
+      }
+
+      function escapeAttr(s) { return String(s ?? '').replace(/"/g, '&quot;'); }
+      function escapeHtml(s) { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; }
+      function formatTime(iso) {
+        if (!iso) return '—';
+        try { return new Date(iso).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }); }
+        catch { return iso; }
+      }
+
+      function renderLeagues(leagues) {
+        const container = document.getElementById('leagues');
+        if (!leagues.length) {
+          container.innerHTML = '<p class="loading">No leagues. Click Search to load.</p>';
+          return;
+        }
+        container.innerHTML = leagues.map(({ league, event_count }) => `
+          <div class="league-item" data-league="${escapeAttr(league)}">
+            <div class="league-header">${escapeHtml(league)} <span>(${event_count} events)</span></div>
+            <div class="league-content" data-loaded="false"></div>
+          </div>
+        `).join('');
+        container.querySelectorAll('.league-header').forEach(h => {
+          h.addEventListener('click', () => toggleLeague(h.closest('.league-item')));
+        });
+      }
+
+      async function toggleLeague(leagueEl) {
+        const content = leagueEl.querySelector('.league-content');
+        const league = leagueEl.dataset.league;
+        if (content.dataset.loaded === 'true') {
+          content.style.display = content.style.display === 'none' ? '' : 'none';
+          return;
+        }
+        content.innerHTML = '<span class="loading">Loading events…</span>';
+        content.style.display = '';
+        try {
+          const events = await loadEvents(league);
+          content.dataset.loaded = 'true';
+          if (!events.length) {
+            content.innerHTML = '<p class="loading">No events.</p>';
+            return;
+          }
+          content.innerHTML = events.map(e => `
+            <div class="event-item" data-market-id="${escapeAttr(e.market_id)}" data-event-id="${escapeAttr(e.event_id)}" data-event-name="${escapeAttr(e.event_name)}">
+              ${escapeHtml(e.event_name || e.market_id)} — ${formatTime(e.event_open_date)}
+            </div>
+          `).join('');
+          content.querySelectorAll('.event-item').forEach(el => {
+            el.addEventListener('click', () => selectEvent(el));
+          });
+        } catch (err) {
+          content.innerHTML = '<p class="error">' + escapeHtml(err.message) + '</p>';
+        }
+      }
+
+      function selectEvent(eventEl) {
+        document.querySelectorAll('.event-item').forEach(e => e.classList.remove('selected'));
+        eventEl.classList.add('selected');
+        const marketId = eventEl.dataset.marketId;
+        const eventId = eventEl.dataset.eventId;
+        const eventName = eventEl.dataset.eventName;
+        // Prefer event_id for "Event → all markets"; fallback to market_id when event_id is null/missing
+        const idForMarkets = (eventId != null && String(eventId).trim() !== '') ? eventId : marketId;
+        showEventDetail(idForMarkets, eventName, marketId);
+      }
+
+      async function showEventDetail(eventOrMarketId, eventName, preferredMarketId) {
+        const container = document.getElementById('eventDetail');
+        container.innerHTML = '<p class="loading">Loading markets…</p>';
+        try {
+          const markets = await loadMarkets(eventOrMarketId);
+          if (!markets.length) {
+            container.innerHTML = '<p class="loading">No markets for this event.</p>';
+            return;
+          }
+          const selectedMarket = (preferredMarketId && markets.find(m => m.market_id === preferredMarketId)) || markets[0];
+          container.innerHTML = `
+            <div class="eventDetail">
+              <h3>${escapeHtml(eventName || selectedMarket.event_name || eventOrMarketId)}</h3>
+              <div class="markets-list">
+                <strong>Markets:</strong>
+                ${markets.map((m) => `
+                  <div class="market-item" data-market-id="${escapeAttr(m.market_id)}" data-market-name="${escapeAttr(m.market_name || m.market_id)}">${escapeHtml(m.market_name || m.market_id)}</div>
+                `).join('')}
+              </div>
+              <div id="snapshotsContainer"></div>
+            </div>
+          `;
+          container.querySelectorAll('.market-item').forEach((el) => {
+            if (el.dataset.marketId === selectedMarket.market_id) el.classList.add('selected');
+            el.addEventListener('click', () => selectMarket(el, eventName));
+          });
+          await loadAndShowSnapshots(selectedMarket.market_id, eventName);
+        } catch (err) {
+          container.innerHTML = '<p class="error">' + escapeHtml(err.message) + '</p>';
+        }
+      }
+
+      function selectMarket(marketEl, eventName) {
+        document.querySelectorAll('.market-item').forEach(e => e.classList.remove('selected'));
+        marketEl.classList.add('selected');
+        loadAndShowSnapshots(marketEl.dataset.marketId, eventName);
+      }
+
+      async function loadAndShowSnapshots(marketId, eventName) {
+        const container = document.getElementById('snapshotsContainer');
+        if (!container) return;
+        container.innerHTML = '<p class="loading">Loading snapshots…</p>';
+        const windowHours = Math.min(parseInt(document.getElementById('windowHours').value, 10) || 24, MAX_WINDOW_H);
+        try {
+          let data = await loadSnapshots(marketId, windowHours);
+          if (!data.length) {
+            container.innerHTML = '<p class="loading">No snapshots (max ' + SNAPSHOT_LIMIT + ' points, window up to ' + MAX_WINDOW_H + 'h).</p>';
+            return;
+          }
+          data = [...data].sort((a, b) => {
+            const ta = a.snapshot_at != null ? new Date(a.snapshot_at).getTime() : 0;
+            const tb = b.snapshot_at != null ? new Date(b.snapshot_at).getTime() : 0;
+            return ta - tb;
+          });
+          const keys = getScalarColumns(data[0]);
+          const tableId = 'snapshots-table-' + Math.random().toString(36).slice(2, 9);
+          const colVisibilityHtml = keys.map(k => `
+            <li><label><input type="checkbox" checked data-col="${escapeAttr(k)}" data-table="${escapeAttr(tableId)}"> ${escapeHtml(k)}</label></li>
+          `).join('');
+          container.innerHTML = `
+            <div class="snapshots-wrap">
+              <p>${data.length} snapshot(s) over time (chronological). Click a row for raw_payload.</p>
+              <details class="col-visibility">
+                <summary>Show/hide columns</summary>
+                <ul>${colVisibilityHtml}</ul>
+              </details>
+              <div class="snapshots">
+                <table id="${escapeAttr(tableId)}">
+                  <thead><tr>
+                    ${keys.map(k => '<th data-col="' + escapeAttr(k) + '">' + escapeHtml(k) + '</th>').join('')}
+                  </tr></thead>
+                  <tbody>
+                    ${data.map(row => '<tr class="clickable" data-snapshot-id="' + escapeAttr(row.snapshot_id) + '">' +
+                      keys.map(k => '<td data-col="' + escapeAttr(k) + '">' + escapeHtml(formatVal(row[k])) + '</td>').join('') + '</tr>').join('')}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          `;
+          container.querySelectorAll('tbody tr.clickable').forEach(tr => {
+            tr.addEventListener('click', () => showRawModal(parseInt(tr.dataset.snapshotId, 10)));
+          });
+          container.querySelectorAll('.col-visibility input[type="checkbox"]').forEach(cb => {
+            cb.addEventListener('change', () => {
+              const col = cb.dataset.col;
+              const table = document.getElementById(cb.dataset.table);
+              if (!table) return;
+              table.querySelectorAll('th[data-col="' + col + '"], td[data-col="' + col + '"]').forEach(el => {
+                el.classList.toggle('hide-col', !cb.checked);
+              });
+            });
+          });
+        } catch (err) {
+          container.innerHTML = '<p class="error">' + escapeHtml(err.message) + '</p>';
+        }
+      }
+
+      /** Scalar-only columns from first snapshot: exclude snapshot_id, raw_payload, and non-scalar (array/object). */
+      function getScalarColumns(firstRow) {
+        const exclude = new Set(['snapshot_id', 'raw_payload']);
+        const keys = [];
+        for (const k of Object.keys(firstRow)) {
+          if (exclude.has(k)) continue;
+          const v = firstRow[k];
+          if (v !== null && typeof v === 'object') continue;
+          keys.push(k);
+        }
+        if (keys.includes('snapshot_at')) {
+          const rest = keys.filter(k => k !== 'snapshot_at');
+          return ['snapshot_at', ...rest];
+        }
+        return keys;
+      }
+
+      function formatVal(v) {
+        if (v == null) return '—';
+        if (typeof v === 'boolean') return v ? 'true' : 'false';
+        if (typeof v === 'number' && !Number.isInteger(v)) return v.toFixed(2);
+        if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(v)) return formatTime(v);
+        return String(v);
+      }
+
+      function showRawModal(snapshotId) {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal';
+        overlay.innerHTML = '<div class="modal-content"><span class="modal-close">×</span><p class="loading">Loading raw_payload…</p></div>';
+        overlay.querySelector('.modal-close').onclick = () => overlay.remove();
+        overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+        document.body.appendChild(overlay);
+        loadRaw(snapshotId).then(res => {
+          const truncatedNote = res.truncated ? '<p class="subtitle">Preview only (truncated). Total size: ' + (res.raw_payload_size_bytes || 0) + ' bytes. View in browser DevTools for full payload if needed.</p>' : '';
+          const payloadText = typeof res.raw_payload === 'string' ? res.raw_payload : JSON.stringify(res.raw_payload, null, 2);
+          overlay.querySelector('.modal-content').innerHTML = '<span class="modal-close">×</span>' + truncatedNote + '<pre>' + escapeHtml(payloadText) + '</pre>';
+          overlay.querySelector('.modal-close').onclick = () => overlay.remove();
+        }).catch(err => {
+          overlay.querySelector('.modal-content').innerHTML = '<span class="modal-close">×</span><p class="error">' + escapeHtml(err.message) + '</p>';
+          overlay.querySelector('.modal-close').onclick = () => overlay.remove();
+        });
+      }
+
+      document.getElementById('btnSearch').addEventListener('click', async () => {
+        const leagues = await loadLeagues();
+        renderLeagues(leagues);
+        document.getElementById('eventDetail').innerHTML = '';
+      });
+    })();
+  </script>
+</body>
+</html>

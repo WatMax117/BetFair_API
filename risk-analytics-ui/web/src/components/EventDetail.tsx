@@ -56,8 +56,6 @@ function spread(back: number | null, lay: number | null): number | null {
   return null
 }
 
-const IMPEDANCE_INDEX_TOOLTIP = 'VWAP/top-N (back+lay) modelled exposure; negative of modelled book P&L if the outcome wins.'
-
 /** Fixed width for H/A/D labels so letters align across all HadCell columns in the table */
 const HAD_LABEL_WIDTH = '1.25em'
 
@@ -104,8 +102,6 @@ export function EventDetail({
   const [rawModalOpen, setRawModalOpen] = useState(false)
   const [rawPayload, setRawPayload] = useState<unknown>(null)
   const [rawLoading, setRawLoading] = useState(false)
-  /** Impedance is always loaded and shown (no toggle). */
-  const includeImpedance = true
 
   const from = useMemo(() => new Date(Date.now() - timeRangeHours * 60 * 60 * 1000), [timeRangeHours])
   const to = useMemo(() => new Date(), [timeRangeHours])
@@ -120,24 +116,14 @@ export function EventDetail({
 
   const loadTimeseries = useCallback(() => {
     setLoadingTs(true)
-    console.log('[EventDetail] Loading timeseries', { marketId, includeImpedance, from: from.toISOString(), to: to.toISOString() })
-    fetchEventTimeseries(marketId, from, to, 15, includeImpedance)
-      .then((data) => {
-        console.log('[EventDetail] Timeseries loaded', { 
-          count: data.length, 
-          hasImpedance: data.some(p => p.impedance),
-          sampleImpedance: data.find(p => p.impedance)?.impedance,
-          hasImpedanceInputs: data.some(p => p.impedanceInputs),
-          sampleImpedanceInputs: data.find(p => p.impedanceInputs)?.impedanceInputs
-        })
-        setTimeseries(data)
-      })
+    fetchEventTimeseries(marketId, from, to, 15)
+      .then(setTimeseries)
       .catch((e) => {
         console.error('[EventDetail] Timeseries load error', e)
         setTimeseries([])
       })
       .finally(() => setLoadingTs(false))
-  }, [marketId, from, to, includeImpedance])
+  }, [marketId, from, to])
 
   useEffect(() => {
     loadTimeseries()
@@ -161,27 +147,12 @@ export function EventDetail({
     home_back: p.home_best_back ?? null,
     away_back: p.away_best_back ?? null,
     draw_back: p.draw_best_back ?? null,
-    home_risk: p.home_risk ?? null,
-    away_risk: p.away_risk ?? null,
-    draw_risk: p.draw_risk ?? null,
     total_volume: p.total_volume ?? null,
     home_book_risk_l3: p.home_book_risk_l3 ?? null,
     away_book_risk_l3: p.away_book_risk_l3 ?? null,
     draw_book_risk_l3: p.draw_book_risk_l3 ?? null,
-    home_impedance_raw: p.impedance?.home ?? null,
-    away_impedance_raw: p.impedance?.away ?? null,
-    draw_impedance_raw: p.impedance?.draw ?? null,
   }))
-  const hasImpedance = timeseries.some((p) => p.impedance && (p.impedance.home != null || p.impedance.away != null || p.impedance.draw != null))
   const hasBookRiskL3 = timeseries.some((p) => p.home_book_risk_l3 != null || p.away_book_risk_l3 != null || p.draw_book_risk_l3 != null)
-  useEffect(() => {
-    console.log('[EventDetail] Render state', { 
-      includeImpedance, 
-      timeseriesLength: timeseries.length, 
-      hasImpedance,
-      samplePoint: timeseries.find(p => p.impedance) 
-    })
-  }, [includeImpedance, timeseries, hasImpedance])
 
   const latest = timeseries.length > 0 ? timeseries[timeseries.length - 1] : null
   /** Last 10 snapshots from Debug endpoint (per-snapshot rows with L2/L3). */
@@ -245,57 +216,6 @@ export function EventDetail({
                   </Box>
                 </Tooltip>
                 <Box>
-                  <Typography variant="caption" color="text.secondary">Imbalance index (H / A / D)</Typography>
-                  <Typography>H {num(latest.home_risk)} / A {num(latest.away_risk)} / D {num(latest.draw_risk)}</Typography>
-                </Box>
-                {includeImpedance && latest.impedance && (latest.impedance.home != null || latest.impedance.away != null || latest.impedance.draw != null) && (
-                  <Tooltip title={IMPEDANCE_INDEX_TOOLTIP}>
-                    <Box>
-                      <Typography variant="caption" color="text.secondary">Impedance Index (H / A / D)</Typography>
-                      <Typography>H {num(latest.impedance.home)} / A {num(latest.impedance.away)} / D {num(latest.impedance.draw)}</Typography>
-                    </Box>
-                  </Tooltip>
-                )}
-                {includeImpedance && latest.impedanceInputs && (
-                  <>
-                    <Box>
-                      <Typography variant="caption" color="text.secondary">Back stake (H / A / D)</Typography>
-                      <Typography>H {num(latest.impedanceInputs.home?.backStake)} / A {num(latest.impedanceInputs.away?.backStake)} / D {num(latest.impedanceInputs.draw?.backStake)}</Typography>
-                    </Box>
-                    <Box>
-                      <Typography variant="caption" color="text.secondary">Back odds (H / A / D)</Typography>
-                      <Typography>H {num(latest.impedanceInputs.home?.backOdds)} / A {num(latest.impedanceInputs.away?.backOdds)} / D {num(latest.impedanceInputs.draw?.backOdds)}</Typography>
-                    </Box>
-                    <Box>
-                      <Typography variant="caption" color="text.secondary">Back profit (H / A / D)</Typography>
-                      <Typography>H {num(latest.impedanceInputs.home?.backProfit)} / A {num(latest.impedanceInputs.away?.backProfit)} / D {num(latest.impedanceInputs.draw?.backProfit)}</Typography>
-                    </Box>
-                    <Box>
-                      <Typography variant="caption" color="text.secondary">Lay stake (H / A / D)</Typography>
-                      <Typography>H {num(latest.impedanceInputs.home?.layStake)} / A {num(latest.impedanceInputs.away?.layStake)} / D {num(latest.impedanceInputs.draw?.layStake)}</Typography>
-                    </Box>
-                    <Box>
-                      <Typography variant="caption" color="text.secondary">Lay odds (H / A / D)</Typography>
-                      <Typography>H {num(latest.impedanceInputs.home?.layOdds)} / A {num(latest.impedanceInputs.away?.layOdds)} / D {num(latest.impedanceInputs.draw?.layOdds)}</Typography>
-                    </Box>
-                    <Box>
-                      <Typography variant="caption" color="text.secondary">Lay liability (H / A / D)</Typography>
-                      <Typography>H {num(latest.impedanceInputs.home?.layLiability)} / A {num(latest.impedanceInputs.away?.layLiability)} / D {num(latest.impedanceInputs.draw?.layLiability)}</Typography>
-                    </Box>
-                    {(() => {
-                      const totalBack = (latest.impedanceInputs.home?.backStake ?? 0) + (latest.impedanceInputs.away?.backStake ?? 0) + (latest.impedanceInputs.draw?.backStake ?? 0)
-                      const totalLay = (latest.impedanceInputs.home?.layStake ?? 0) + (latest.impedanceInputs.away?.layStake ?? 0) + (latest.impedanceInputs.draw?.layStake ?? 0)
-                      const scale = totalBack + totalLay
-                      return (
-                        <Box>
-                          <Typography variant="caption" color="text.secondary">Total scale</Typography>
-                          <Typography>back: {num(totalBack)} / lay: {num(totalLay)} / scale: {num(scale)}</Typography>
-                        </Box>
-                      )
-                    })()}
-                  </>
-                )}
-                <Box>
                   <Typography variant="caption" color="text.secondary">Total volume</Typography>
                   <Typography>{num(latest.total_volume)}</Typography>
                 </Box>
@@ -356,46 +276,6 @@ export function EventDetail({
                 </Paper>
               )}
 
-              {/* Chart 2: Imbalance */}
-              <Paper sx={{ p: 1, mb: 2, height: 280 }}>
-                <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>Imbalance (H/A/D)</Typography>
-                <ResponsiveContainer width="100%" height={240}>
-                  <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis dataKey="time" />
-                    <YAxis />
-                    <RechartsTooltip />
-                    <Legend />
-                    <Line type="monotone" dataKey="home_risk" name="Home" stroke="#1976d2" dot={false} />
-                    <Line type="monotone" dataKey="away_risk" name="Away" stroke="#9c27b0" dot={false} />
-                    <Line type="monotone" dataKey="draw_risk" name="Draw" stroke="#2e7d32" dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </Paper>
-
-              {/* Chart 3: Impedance */}
-              {includeImpedance && hasImpedance && (
-                <Paper sx={{ p: 1, mb: 2, height: 280 }}>
-                  <Box sx={{ px: 1 }}>
-                    <Tooltip title={IMPEDANCE_INDEX_TOOLTIP}>
-                      <Typography variant="caption" color="text.secondary" component="span">Impedance Index (H/A/D)</Typography>
-                    </Tooltip>
-                  </Box>
-                  <ResponsiveContainer width="100%" height={240}>
-                    <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-                      <CartesianGrid strokeDasharray="3 3" />
-                      <XAxis dataKey="time" />
-                      <YAxis />
-                      <RechartsTooltip />
-                      <Legend />
-                      <Line type="monotone" dataKey="home_impedance_raw" name="Home" stroke="#1976d2" dot={false} />
-                      <Line type="monotone" dataKey="away_impedance_raw" name="Away" stroke="#9c27b0" dot={false} />
-                      <Line type="monotone" dataKey="draw_impedance_raw" name="Draw" stroke="#2e7d32" dot={false} />
-                    </LineChart>
-                  </ResponsiveContainer>
-                </Paper>
-              )}
-
               <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>Last 10 snapshots (copy-friendly)</Typography>
               {loadingSnapshots ? (
                 <Typography color="text.secondary" sx={{ mb: 2 }}>Loading snapshots…</Typography>
@@ -412,8 +292,6 @@ export function EventDetail({
                       <TableCell align="left" title="L3 best back odds">backOdds (L3)</TableCell>
                       <TableCell align="left" title="L3 best back size">backSize (L3)</TableCell>
                       <TableCell align="left" title="3-way book exposure at top 3 back levels. R[o]=W[o]-L[o]; &gt;0 = book loses if outcome wins.">Book Risk L3 (H/A/D)</TableCell>
-                      <TableCell align="left">Imbalance</TableCell>
-                      <TableCell align="left" title={IMPEDANCE_INDEX_TOOLTIP}>Impedance Index</TableCell>
                       <TableCell align="right">total_volume</TableCell>
                     </TableRow>
                   </TableHead>
@@ -470,16 +348,6 @@ export function EventDetail({
                               draw={p.draw_book_risk_l3 ?? null}
                             />
                           </TableCell>
-                          <TableCell align="left">
-                            <HadCell home={p.home_risk ?? null} away={p.away_risk ?? null} draw={p.draw_risk ?? null} />
-                          </TableCell>
-                          <TableCell align="left">
-                            <HadCell
-                              home={p.impedance?.home ?? p.home_impedance ?? null}
-                              away={p.impedance?.away ?? p.away_impedance ?? null}
-                              draw={p.impedance?.draw ?? p.draw_impedance ?? null}
-                            />
-                          </TableCell>
                           <TableCell align="right">{num(p.mdm_total_volume ?? p.total_volume ?? null)}</TableCell>
                         </TableRow>
                     ))}
@@ -495,7 +363,7 @@ export function EventDetail({
             <Typography variant="caption" color="text.secondary" display="block">Data notes</Typography>
             <Typography variant="body2">
               Snapshot interval: 15 minutes. total_volume is market-level totalMatched; per-runner matched volume may be unavailable via REST.
-              backOdds/backSize (L1/L2/L3) are best three back levels. Impedance Index is VWAP/top-N modelled exposure.
+              backOdds/backSize (L1/L2/L3) are best three back levels.
             </Typography>
             {latest && timeseries.length > 0 && (
               <Typography variant="body2" sx={{ mt: 0.5 }}>

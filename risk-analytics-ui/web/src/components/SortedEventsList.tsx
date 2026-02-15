@@ -232,12 +232,6 @@ export function SortedEventsList({
               <TableCell align="right">Book Risk H</TableCell>
               <TableCell align="right">Book Risk A</TableCell>
               <TableCell align="right">Book Risk D</TableCell>
-              <TableCell align="right">Imbalance H</TableCell>
-              <TableCell align="right">Imbalance A</TableCell>
-              <TableCell align="right">Imbalance D</TableCell>
-              <TableCell align="right">Impedance H</TableCell>
-              <TableCell align="right">Impedance A</TableCell>
-              <TableCell align="right">Impedance D</TableCell>
               <TableCell align="right">Volume</TableCell>
               <TableCell>Open date</TableCell>
             </TableRow>
@@ -266,12 +260,6 @@ export function SortedEventsList({
                 <TableCell align="right">{num(e.home_book_risk_l3 ?? null)}</TableCell>
                 <TableCell align="right">{num(e.away_book_risk_l3 ?? null)}</TableCell>
                 <TableCell align="right">{num(e.draw_book_risk_l3 ?? null)}</TableCell>
-                <TableCell align="right">{num(e.home_risk ?? null)}</TableCell>
-                <TableCell align="right">{num(e.away_risk ?? null)}</TableCell>
-                <TableCell align="right">{num(e.draw_risk ?? null)}</TableCell>
-                <TableCell align="right">{num(e.impedance?.home ?? null)}</TableCell>
-                <TableCell align="right">{num(e.impedance?.away ?? null)}</TableCell>
-                <TableCell align="right">{num(e.impedance?.draw ?? null)}</TableCell>
                 <TableCell align="right">{num(e.total_volume ?? null)}</TableCell>
                 <TableCell>{formatTime(e.event_open_date)}</TableCell>
               </TableRow>

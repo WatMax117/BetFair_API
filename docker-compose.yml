@@ -57,9 +57,9 @@ services:
       - BETFAIR_TOKEN_URL=http://auth-service:8080/token
       - betfair.csv-logging.output-dir=/app/logs
       - SERVER_PORT=8081
-      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/${POSTGRES_DB:-netbet}
-      - SPRING_DATASOURCE_USERNAME=${POSTGRES_USER:-netbet}
-      - SPRING_DATASOURCE_PASSWORD=${POSTGRES_PASSWORD:-netbet}
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/${POSTGRES_DB:-netbet}?currentSchema=stream_ingest
+      - SPRING_DATASOURCE_USERNAME=${POSTGRES_STREAM_WRITER_USER:-netbet_stream_writer}
+      - SPRING_DATASOURCE_PASSWORD=${POSTGRES_STREAM_WRITER_PASSWORD}
       - BETFAIR_POSTGRES_SINK_ENABLED=${BETFAIR_POSTGRES_SINK_ENABLED:-true}
     volumes:
       - /opt/netbet/logs:/app/logs
@@ -83,11 +83,21 @@ services:
       - BF_HEARTBEAT_SUCCESS=/app/data/heartbeat_success
       - BF_WINDOW_HOURS=24
       - BF_LOOKBACK_MINUTES=60
-      - POSTGRES_HOST=postgres
+      - POSTGRES_HOST=netbet-postgres
       - POSTGRES_PORT=5432
       - POSTGRES_DB=${POSTGRES_DB:-netbet}
-      - POSTGRES_USER=${POSTGRES_USER:-netbet}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-netbet}
+      - POSTGRES_USER=${POSTGRES_REST_WRITER_USER:-netbet_rest_writer}
+      - POSTGRES_PASSWORD=${POSTGRES_REST_WRITER_PASSWORD}
+      - PGOPTIONS=-c search_path=public
+      # Sticky pre-match K=200 (set in .env or use defaults)
+      - BF_STICKY_PREMATCH=${BF_STICKY_PREMATCH:-1}
+      - BF_STICKY_K=${BF_STICKY_K:-200}
+      - BF_STICKY_CATALOGUE_MAX=${BF_STICKY_CATALOGUE_MAX:-400}
+      - BF_KICKOFF_BUFFER_SECONDS=${BF_KICKOFF_BUFFER_SECONDS:-60}
+      - BF_STICKY_NEAR_KICKOFF_HOURS=${BF_STICKY_NEAR_KICKOFF_HOURS:-2}
+      - BF_STICKY_NEAR_KICKOFF_CONSECUTIVE_TICKS=${BF_STICKY_NEAR_KICKOFF_CONSECUTIVE_TICKS:-1}
+      - BF_MARKET_BOOK_BATCH_SIZE=${BF_MARKET_BOOK_BATCH_SIZE:-50}
+      - BF_INTERVAL_SECONDS=${BF_INTERVAL_SECONDS:-900}
     volumes:
       - /opt/netbet/auth-service/certs:/app/certs:ro
       - betfair-rest-client-data:/app/data
@@ -119,11 +129,12 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      POSTGRES_HOST: postgres
+      POSTGRES_HOST: netbet-postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-netbet}
-      POSTGRES_USER: ${POSTGRES_USER:-netbet}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-netbet}
+      POSTGRES_USER: ${POSTGRES_ANALYTICS_READER_USER:-netbet_analytics_reader}
+      POSTGRES_PASSWORD: ${POSTGRES_ANALYTICS_READER_PASSWORD}
+      PGOPTIONS: -c search_path=public,analytics
     ports:
       - "8000:8000"
 

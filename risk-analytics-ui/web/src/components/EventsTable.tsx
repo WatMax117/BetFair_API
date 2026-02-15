@@ -29,20 +29,14 @@ function num(v: number | null): string {
 export function EventsTable({
   events,
   onSelectEvent,
-  extremeThreshold,
   showLimitNote = false,
 }: {
   events: EventItem[]
   onSelectEvent: (e: EventItem) => void
-  extremeThreshold: number
   showLimitNote?: boolean
 }) {
   const metaTooltip = (e: EventItem) =>
     `depth_limit: ${e.depth_limit ?? '—'}, calculation_version: ${e.calculation_version ?? '—'}`
-  const isExtreme = (e: EventItem) =>
-    (e.home_risk != null && Math.abs(e.home_risk) > extremeThreshold) ||
-    (e.away_risk != null && Math.abs(e.away_risk) > extremeThreshold) ||
-    (e.draw_risk != null && Math.abs(e.draw_risk) > extremeThreshold)
 
   if (events.length === 0) {
     return (
@@ -66,9 +60,6 @@ export function EventsTable({
             <TableCell align="right">Home</TableCell>
             <TableCell align="right">Away</TableCell>
             <TableCell align="right">Draw</TableCell>
-            <TableCell align="right">Index H</TableCell>
-            <TableCell align="right">Index A</TableCell>
-            <TableCell align="right">Index D</TableCell>
             <TableCell align="right">Volume</TableCell>
             <TableCell>Last update</TableCell>
             <TableCell padding="none" width={40} />
@@ -82,7 +73,6 @@ export function EventsTable({
               onClick={() => onSelectEvent(e)}
               sx={{
                 cursor: 'pointer',
-                bgcolor: isExtreme(e) ? 'action.hover' : undefined,
                 '&:hover': { bgcolor: 'action.selected' },
               }}
             >
@@ -91,9 +81,6 @@ export function EventsTable({
               <TableCell align="right">{num(e.home_best_back)}</TableCell>
               <TableCell align="right">{num(e.away_best_back)}</TableCell>
               <TableCell align="right">{num(e.draw_best_back)}</TableCell>
-              <TableCell align="right">{num(e.home_risk)}</TableCell>
-              <TableCell align="right">{num(e.away_risk)}</TableCell>
-              <TableCell align="right">{num(e.draw_risk)}</TableCell>
               <TableCell align="right">{num(e.total_volume)}</TableCell>
               <TableCell>{formatTime(e.latest_snapshot_at)}</TableCell>
               <TableCell padding="none" onClick={(ev) => ev.stopPropagation()}>

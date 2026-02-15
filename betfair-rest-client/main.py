@@ -43,6 +43,20 @@ POSTGRES_DB = os.environ.get("POSTGRES_DB", "netbet")
 POSTGRES_USER = os.environ.get("POSTGRES_USER", "netbet")
 POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "")
 
+# Sticky pre-match tracking (BF_STICKY_PREMATCH=1) — target 200 matches
+STICKY_PREMATCH = os.environ.get("BF_STICKY_PREMATCH", "").lower() in ("1", "true", "yes")
+STICKY_K = int(os.environ.get("BF_STICKY_K", "200"))
+STICKY_KICKOFF_BUFFER_SECONDS = int(os.environ.get("BF_KICKOFF_BUFFER_SECONDS", "60"))
+STICKY_V_MIN = float(os.environ.get("BF_STICKY_V_MIN", "0"))
+STICKY_T_MIN_HOURS = float(os.environ.get("BF_STICKY_T_MIN_HOURS", "0"))
+STICKY_T_MAX_HOURS = float(os.environ.get("BF_STICKY_T_MAX_HOURS", "24"))
+STICKY_REQUIRE_CONSECUTIVE_TICKS = int(os.environ.get("BF_STICKY_REQUIRE_CONSECUTIVE_TICKS", "2"))
+# Relax maturity for near-kickoff: require 1 tick when kickoff within this many hours (else STICKY_REQUIRE_CONSECUTIVE_TICKS)
+STICKY_NEAR_KICKOFF_HOURS = float(os.environ.get("BF_STICKY_NEAR_KICKOFF_HOURS", "2"))
+STICKY_NEAR_KICKOFF_CONSECUTIVE_TICKS = int(os.environ.get("BF_STICKY_NEAR_KICKOFF_CONSECUTIVE_TICKS", "1"))
+STICKY_CATALOGUE_MAX = int(os.environ.get("BF_STICKY_CATALOGUE_MAX", "400"))
+MARKET_BOOK_BATCH_SIZE = int(os.environ.get("BF_MARKET_BOOK_BATCH_SIZE", "50"))
+
 # -----------------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------------
@@ -427,13 +441,9 @@ def _ensure_three_layer_tables(conn):
             );
         """)
         cur.execute("CREATE INDEX IF NOT EXISTS idx_mdm_market_snapshot ON market_derived_metrics (market_id, snapshot_at);")
+        # Optional columns (no risk/impedance indices — MVP simplification)
         for col in (
-            "home_impedance", "away_impedance", "draw_impedance",
-            "home_impedance_norm", "away_impedance_norm", "draw_impedance_norm",
             "home_book_risk_l3", "away_book_risk_l3", "draw_book_risk_l3",
-            "home_back_stake", "home_back_odds", "home_lay_stake", "home_lay_odds",
-            "away_back_stake", "away_back_odds", "away_lay_stake", "away_lay_odds",
-            "draw_back_stake", "draw_back_odds", "draw_lay_stake", "draw_lay_odds",
             "home_best_back_size_l1", "away_best_back_size_l1", "draw_best_back_size_l1",
             "home_best_lay_size_l1", "away_best_lay_size_l1", "draw_best_lay_size_l1",
             "home_back_odds_l2", "home_back_size_l2", "home_back_odds_l3", "home_back_size_l3",
@@ -539,11 +549,10 @@ def _insert_raw_snapshot(
 
 
 def _insert_derived_metrics(conn, snapshot_id: int, snapshot_at, market_id: str, metrics: Dict):
-    """Insert one row into market_derived_metrics (no raw_payload). Includes optional impedance and impedance-input columns."""
+    """Insert one row into market_derived_metrics. Imbalance and Impedance indices removed (MVP)."""
     params = {
         "snapshot_id": snapshot_id, "snapshot_at": snapshot_at, "market_id": market_id,
-        "home_risk": metrics["home_risk"], "away_risk": metrics["away_risk"],
-        "draw_risk": metrics["draw_risk"], "total_volume": metrics["total_volume"],
+        "total_volume": metrics["total_volume"],
         "home_best_back": metrics.get("home_best_back"), "away_best_back": metrics.get("away_best_back"),
         "draw_best_back": metrics.get("draw_best_back"),
         "home_best_lay": metrics.get("home_best_lay"), "away_best_lay": metrics.get("away_best_lay"),
@@ -552,20 +561,9 @@ def _insert_derived_metrics(conn, snapshot_id: int, snapshot_at, market_id: str,
         "draw_spread": metrics.get("draw_spread"),
         "depth_limit": metrics.get("depth_limit"),
         "calculation_version": metrics.get("calculation_version", "v1"),
-        "home_impedance": metrics.get("home_impedance"), "away_impedance": metrics.get("away_impedance"),
-        "draw_impedance": metrics.get("draw_impedance"),
-        "home_impedance_norm": metrics.get("home_impedance_norm"),
-        "away_impedance_norm": metrics.get("away_impedance_norm"),
-        "draw_impedance_norm": metrics.get("draw_impedance_norm"),
         "home_book_risk_l3": metrics.get("home_book_risk_l3"),
         "away_book_risk_l3": metrics.get("away_book_risk_l3"),
         "draw_book_risk_l3": metrics.get("draw_book_risk_l3"),
-        "home_back_stake": metrics.get("home_back_stake"), "home_back_odds": metrics.get("home_back_odds"),
-        "home_lay_stake": metrics.get("home_lay_stake"), "home_lay_odds": metrics.get("home_lay_odds"),
-        "away_back_stake": metrics.get("away_back_stake"), "away_back_odds": metrics.get("away_back_odds"),
-        "away_lay_stake": metrics.get("away_lay_stake"), "away_lay_odds": metrics.get("away_lay_odds"),
-        "draw_back_stake": metrics.get("draw_back_stake"), "draw_back_odds": metrics.get("draw_back_odds"),
-        "draw_lay_stake": metrics.get("draw_lay_stake"), "draw_lay_odds": metrics.get("draw_lay_odds"),
         "home_best_back_size_l1": metrics.get("home_best_back_size_l1"),
         "away_best_back_size_l1": metrics.get("away_best_back_size_l1"),
         "draw_best_back_size_l1": metrics.get("draw_best_back_size_l1"),
@@ -589,18 +587,12 @@ def _insert_derived_metrics(conn, snapshot_id: int, snapshot_at, market_id: str,
         cur.execute(
             """
             INSERT INTO market_derived_metrics (
-                snapshot_id, snapshot_at, market_id,
-                home_risk, away_risk, draw_risk, total_volume,
+                snapshot_id, snapshot_at, market_id, total_volume,
                 home_best_back, away_best_back, draw_best_back,
                 home_best_lay, away_best_lay, draw_best_lay,
                 home_spread, away_spread, draw_spread,
                 depth_limit, calculation_version,
-                home_impedance, away_impedance, draw_impedance,
-                home_impedance_norm, away_impedance_norm, draw_impedance_norm,
                 home_book_risk_l3, away_book_risk_l3, draw_book_risk_l3,
-                home_back_stake, home_back_odds, home_lay_stake, home_lay_odds,
-                away_back_stake, away_back_odds, away_lay_stake, away_lay_odds,
-                draw_back_stake, draw_back_odds, draw_lay_stake, draw_lay_odds,
                 home_best_back_size_l1, away_best_back_size_l1, draw_best_back_size_l1,
                 home_best_lay_size_l1, away_best_lay_size_l1, draw_best_lay_size_l1,
                 home_back_odds_l2, home_back_size_l2, home_back_odds_l3, home_back_size_l3,
@@ -608,18 +600,12 @@ def _insert_derived_metrics(conn, snapshot_id: int, snapshot_at, market_id: str,
                 draw_back_odds_l2, draw_back_size_l2, draw_back_odds_l3, draw_back_size_l3
             )
             VALUES (
-                %(snapshot_id)s, %(snapshot_at)s, %(market_id)s,
-                %(home_risk)s, %(away_risk)s, %(draw_risk)s, %(total_volume)s,
+                %(snapshot_id)s, %(snapshot_at)s, %(market_id)s, %(total_volume)s,
                 %(home_best_back)s, %(away_best_back)s, %(draw_best_back)s,
                 %(home_best_lay)s, %(away_best_lay)s, %(draw_best_lay)s,
                 %(home_spread)s, %(away_spread)s, %(draw_spread)s,
                 %(depth_limit)s, %(calculation_version)s,
-                %(home_impedance)s, %(away_impedance)s, %(draw_impedance)s,
-                %(home_impedance_norm)s, %(away_impedance_norm)s, %(draw_impedance_norm)s,
                 %(home_book_risk_l3)s, %(away_book_risk_l3)s, %(draw_book_risk_l3)s,
-                %(home_back_stake)s, %(home_back_odds)s, %(home_lay_stake)s, %(home_lay_odds)s,
-                %(away_back_stake)s, %(away_back_odds)s, %(away_lay_stake)s, %(away_lay_odds)s,
-                %(draw_back_stake)s, %(draw_back_odds)s, %(draw_lay_stake)s, %(draw_lay_odds)s,
                 %(home_best_back_size_l1)s, %(away_best_back_size_l1)s, %(draw_best_back_size_l1)s,
                 %(home_best_lay_size_l1)s, %(away_best_lay_size_l1)s, %(draw_best_lay_size_l1)s,
                 %(home_back_odds_l2)s, %(home_back_size_l2)s, %(home_back_odds_l3)s, %(home_back_size_l3)s,
@@ -773,9 +759,9 @@ def _tick(trading) -> bool:
         return False
 
     books = books_result if isinstance(books_result, list) else []
-    from risk import calculate_risk, compute_impedance_index, compute_book_risk_l3
+    from risk import compute_book_risk_l3
 
-    risk_by_market = []
+    markets_persisted = 0
     try:
         conn = _get_conn()
         for book in books:
@@ -801,6 +787,10 @@ def _tick(trading) -> bool:
             total_matched = book.get("totalMatched") if isinstance(book, dict) else getattr(book, "totalMatched", None) or getattr(book, "total_matched", None)
             inplay = book.get("inplay") if isinstance(book, dict) else getattr(book, "inplay", None)
             status = book.get("status") if isinstance(book, dict) else getattr(book, "status", None)
+            total_volume = _safe_float(total_matched) if total_matched is not None else sum(
+                _safe_float(r.get("totalMatched") if isinstance(r, dict) else getattr(r, "totalMatched", None) or getattr(r, "total_matched", None))
+                for r in runners
+            )
 
             snapshot_id = _insert_raw_snapshot(
                 conn, snapshot_at, market_id, book_dict,
@@ -809,59 +799,6 @@ def _tick(trading) -> bool:
             if snapshot_id is None:
                 continue
 
-            impedance_out = compute_impedance_index(runners, snapshot_ts=snapshot_at)
-            home_impedance = away_impedance = draw_impedance = None
-            home_impedance_norm = away_impedance_norm = draw_impedance_norm = None
-            home_back_stake = home_back_odds = home_lay_stake = home_lay_odds = None
-            away_back_stake = away_back_odds = away_lay_stake = away_lay_odds = None
-            draw_back_stake = draw_back_odds = draw_lay_stake = draw_lay_odds = None
-            if impedance_out and impedance_out.get("runners"):
-                for ro in impedance_out["runners"]:
-                    logger.info(
-                        "[Impedance] market=%s selectionId=%s impedance=%.2f normImpedance=%.4f backStake=%.2f backOdds=%.2f layStake=%.2f layOdds=%.2f",
-                        market_id,
-                        ro.get("selectionId"),
-                        ro.get("impedance", 0),
-                        ro.get("normImpedance", 0),
-                        ro.get("backStake", 0),
-                        ro.get("backOdds", 0),
-                        ro.get("layStake", 0),
-                        ro.get("layOdds", 0),
-                    )
-                for ro in impedance_out["runners"]:
-                    sid = ro.get("selectionId")
-                    role = (runner_metadata.get(sid) or "").strip().upper() if sid is not None else None
-                    if not role and sid is not None:
-                        try:
-                            role = (runner_metadata.get(int(sid)) or "").strip().upper()
-                        except (TypeError, ValueError):
-                            pass
-                    if role == "HOME":
-                        home_impedance = ro.get("impedance")
-                        home_impedance_norm = ro.get("normImpedance")
-                        home_back_stake = ro.get("backStake")
-                        home_back_odds = ro.get("backOdds")
-                        home_lay_stake = ro.get("layStake")
-                        home_lay_odds = ro.get("layOdds")
-                    elif role == "AWAY":
-                        away_impedance = ro.get("impedance")
-                        away_impedance_norm = ro.get("normImpedance")
-                        away_back_stake = ro.get("backStake")
-                        away_back_odds = ro.get("backOdds")
-                        away_lay_stake = ro.get("layStake")
-                        away_lay_odds = ro.get("layOdds")
-                    elif role == "DRAW":
-                        draw_impedance = ro.get("impedance")
-                        draw_impedance_norm = ro.get("normImpedance")
-                        draw_back_stake = ro.get("backStake")
-                        draw_back_odds = ro.get("backOdds")
-                        draw_lay_stake = ro.get("layStake")
-                        draw_lay_odds = ro.get("layOdds")
-
-            result = calculate_risk(runners, runner_metadata, depth_limit=DEPTH_LIMIT, market_total_matched=total_matched)
-            if result is None:
-                continue
-            home_risk, away_risk, draw_risk, total_volume, _ = result
             book_risk_l3 = compute_book_risk_l3(runners, runner_metadata, depth_limit=DEPTH_LIMIT)
             best_prices = _runner_best_prices(runners, runner_metadata)
             def _spread(back, lay):
@@ -872,44 +809,267 @@ def _tick(trading) -> bool:
             away_spread = _spread(best_prices.get("away_best_back"), best_prices.get("away_best_lay"))
             draw_spread = _spread(best_prices.get("draw_best_back"), best_prices.get("draw_best_lay"))
             metrics = {
-                "home_risk": home_risk, "away_risk": away_risk, "draw_risk": draw_risk,
-                "total_volume": total_volume, "depth_limit": DEPTH_LIMIT, "calculation_version": "imbalance_v1",
+                "total_volume": total_volume, "depth_limit": DEPTH_LIMIT, "calculation_version": "v1",
                 **best_prices,
                 "home_spread": home_spread, "away_spread": away_spread, "draw_spread": draw_spread,
-                "home_impedance": home_impedance, "away_impedance": away_impedance, "draw_impedance": draw_impedance,
-                "home_impedance_norm": home_impedance_norm, "away_impedance_norm": away_impedance_norm, "draw_impedance_norm": draw_impedance_norm,
                 "home_book_risk_l3": (book_risk_l3 or {}).get("home_book_risk_l3"),
                 "away_book_risk_l3": (book_risk_l3 or {}).get("away_book_risk_l3"),
                 "draw_book_risk_l3": (book_risk_l3 or {}).get("draw_book_risk_l3"),
-                "home_back_stake": home_back_stake, "home_back_odds": home_back_odds, "home_lay_stake": home_lay_stake, "home_lay_odds": home_lay_odds,
-                "away_back_stake": away_back_stake, "away_back_odds": away_back_odds, "away_lay_stake": away_lay_stake, "away_lay_odds": away_lay_odds,
-                "draw_back_stake": draw_back_stake, "draw_back_odds": draw_back_odds, "draw_lay_stake": draw_lay_stake, "draw_lay_odds": draw_lay_odds,
             }
             _insert_derived_metrics(conn, snapshot_id, snapshot_at, market_id, metrics)
-            risk_by_market.append((market_id, home_risk, away_risk, draw_risk, total_volume))
+            markets_persisted += 1
         conn.close()
     except Exception as e:
         logger.warning("3-layer persist failed: %s", e)
 
     duration_ms = int((time.monotonic() - start_ts) * 1000)
-    markets_count = len(risk_by_market)
-
-    # Log: tick_id, duration_ms, markets_count; then [Imbalance] per market
-    logger.info(
-        "tick_id=%s duration_ms=%s markets_count=%s",
-        tick_id, duration_ms, markets_count,
-    )
-    for mid, hr, ar, dr, vol in risk_by_market:
-        logger.info(
-            "[Imbalance] Market: %s | H: %.2f | A: %.2f | D: %.2f | Vol: %.2f",
-            mid, hr, ar, dr, vol,
-        )
-
-    if DEBUG_JSON and risk_by_market:
-        logger.debug("Risk by market: %s", risk_by_market)
+    logger.info("tick_id=%s duration_ms=%s markets_count=%s", tick_id, duration_ms, markets_persisted)
 
     _touch_heartbeat_success()
     return True
+
+
+def _tick_sticky_prematch(trading) -> bool:
+    """
+    Sticky pre-match tick: A expire at kickoff, B poll tracked (batched), C discover candidates, D fill to K.
+    Tracked set is persistent; no eviction by rank.
+    """
+    global _tick_id
+    _tick_id += 1
+    tick_id = _tick_id
+    start_ts = time.monotonic()
+    now_utc = datetime.now(timezone.utc)
+    _touch_heartbeat_alive()
+
+    if not _ensure_session(trading):
+        return False
+
+    if not POSTGRES_PASSWORD:
+        logger.warning("POSTGRES_PASSWORD not set; skipping sticky pre-match.")
+        _touch_heartbeat_success()
+        return True
+
+    import sticky_prematch as sp
+
+    conn = _get_conn()
+    try:
+        _ensure_three_layer_tables(conn)
+        sp.ensure_tables(conn)
+    except Exception as e:
+        logger.warning("Table ensure failed: %s", e)
+        conn.close()
+        _touch_heartbeat_success()
+        return True
+
+    try:
+        # Step A — Expire at kickoff + buffer
+        expired = sp.expire_at_kickoff(
+            conn, now_utc, STICKY_KICKOFF_BUFFER_SECONDS, tick_id,
+        )
+        if expired:
+            logger.info("[Sticky] expired_at_kickoff=%s", expired)
+
+        # Step B — Poll tracked only (batched)
+        tracked = sp.get_tracked_active(conn, tick_id)
+        market_ids = [t["market_id"] for t in tracked]
+        requests_this_tick = 0
+        all_books = []
+        for i in range(0, len(market_ids), MARKET_BOOK_BATCH_SIZE):
+            batch = market_ids[i : i + MARKET_BOOK_BATCH_SIZE]
+            if _past_deadline(start_ts):
+                break
+            try:
+                success, books_result = _run_with_backoff(_fetch_market_books, trading, batch, start_ts)
+            except Exception as session_err:
+                if not _ensure_session(trading):
+                    break
+                success, books_result = _run_with_backoff(_fetch_market_books, trading, batch, start_ts)
+            if not success or not books_result:
+                continue
+            books = books_result if isinstance(books_result, list) else []
+            requests_this_tick += 1
+            all_books.extend(books)
+            returned_ids = [
+                str(b.get("marketId") if isinstance(b, dict) else getattr(b, "market_id", None) or getattr(b, "marketId", None))
+                for b in books
+            ]
+            sp.update_tracked_after_poll(conn, returned_ids, now_utc)
+            dropped = sp.drop_tracked_not_found(conn, batch, returned_ids)
+            if dropped:
+                logger.info("[Sticky] dropped_not_found=%s market_ids=%s", dropped, batch[:3])
+
+        # Persist snapshots for all returned books (3-layer flow; no imbalance/impedance — MVP)
+        from risk import compute_book_risk_l3
+        snapshot_at = now_utc
+        for book in all_books:
+            if _past_deadline(start_ts):
+                break
+            market_id = book.get("marketId") if isinstance(book, dict) else getattr(book, "market_id", None) or getattr(book, "marketId", None)
+            if not market_id:
+                continue
+            market_id = str(market_id)
+            runners = book.get("runners") if isinstance(book, dict) else getattr(book, "runners", None) or []
+            if len(runners) < 3:
+                continue
+            runner_metadata = _runner_metadata_from_metadata_table(conn, market_id)
+            if not runner_metadata:
+                logger.warning("Skipping market %s: no metadata mapping in DB.", market_id)
+                continue
+            if isinstance(book, dict):
+                book_dict = book
+            else:
+                book_dict = getattr(book, "json", None) or getattr(book, "__dict__", None) or {}
+                if not isinstance(book_dict, dict):
+                    book_dict = {"marketId": market_id, "runners": []}
+            total_matched = book.get("totalMatched") if isinstance(book, dict) else getattr(book, "totalMatched", None) or getattr(book, "total_matched", None)
+            inplay = book.get("inplay") if isinstance(book, dict) else getattr(book, "inplay", None)
+            status = book.get("status") if isinstance(book, dict) else getattr(book, "status", None)
+            total_volume = _safe_float(total_matched) if total_matched is not None else sum(
+                _safe_float(r.get("totalMatched") if isinstance(r, dict) else getattr(r, "totalMatched", None) or getattr(r, "total_matched", None))
+                for r in runners
+            )
+            snapshot_id = _insert_raw_snapshot(
+                conn, snapshot_at, market_id, book_dict,
+                total_matched=total_matched, inplay=inplay, status=status, depth_limit=DEPTH_LIMIT,
+            )
+            if snapshot_id is None:
+                continue
+            book_risk_l3 = compute_book_risk_l3(runners, runner_metadata, depth_limit=DEPTH_LIMIT)
+            best_prices = _runner_best_prices(runners, runner_metadata)
+            def _spread(back, lay):
+                return float(lay) - float(back) if back is not None and lay is not None else None
+            metrics = {
+                "total_volume": total_volume, "depth_limit": DEPTH_LIMIT, "calculation_version": "v1",
+                **best_prices,
+                "home_spread": _spread(best_prices.get("home_best_back"), best_prices.get("home_best_lay")),
+                "away_spread": _spread(best_prices.get("away_best_back"), best_prices.get("away_best_lay")),
+                "draw_spread": _spread(best_prices.get("draw_best_back"), best_prices.get("draw_best_lay")),
+                "home_book_risk_l3": (book_risk_l3 or {}).get("home_book_risk_l3"),
+                "away_book_risk_l3": (book_risk_l3 or {}).get("away_book_risk_l3"),
+                "draw_book_risk_l3": (book_risk_l3 or {}).get("draw_book_risk_l3"),
+            }
+            _insert_derived_metrics(conn, snapshot_id, snapshot_at, market_id, metrics)
+
+        # Step C — Discover candidates (catalogue)
+        try:
+            success, result = _run_with_backoff(_fetch_catalogue_sticky, trading, start_ts)
+        except Exception as session_err:
+            if not _ensure_session(trading):
+                return False
+            success, result = _run_with_backoff(_fetch_catalogue_sticky, trading, start_ts)
+        catalogues = (result if isinstance(result, list) else []) if success else []
+        def _runner_count(m):
+            rc = m.get("runnerCount") if isinstance(m, dict) else getattr(m, "runnerCount", None) or getattr(m, "runner_count", None)
+            if rc is not None:
+                return int(rc) if str(rc).isdigit() else len(m.get("runners") or getattr(m, "runners", None) or [])
+            return len(m.get("runners") or getattr(m, "runners", None) or [])
+        catalogues = [c for c in catalogues if _runner_count(c) == 3]
+        tracked_ids = sp.get_tracked_market_ids_set(conn)
+        # Build candidate list (is_mature uses seen_markets from *previous* ticks; record_seen after)
+        # so "2 consecutive ticks" = seen at tick_id-1 and now at tick_id
+        def _parse_event_start(ev):
+            if ev is None:
+                return None
+            if hasattr(ev, "isoformat"):
+                if getattr(ev, "tzinfo", None) is None:
+                    return ev.replace(tzinfo=timezone.utc)
+                return ev
+            s = str(ev).strip().replace("Z", "+00:00")
+            try:
+                dt = datetime.fromisoformat(s)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+            except (ValueError, TypeError):
+                return None
+        candidates = []
+        for c in catalogues:
+            market_id = _get_attr(c, "market_id", "marketId")
+            if not market_id or str(market_id) in tracked_ids:
+                continue
+            event = _get_attr(c, "event", "event")
+            event_start_raw = _get_attr(event, "open_date", "openDate") if event else None
+            event_start_utc = _parse_event_start(event_start_raw)
+            # Relax maturity for near-kickoff: 1 consecutive tick when kickoff within N hours
+            delta_hours = (event_start_utc - now_utc).total_seconds() / 3600.0 if event_start_utc else None
+            require_ticks = (
+                STICKY_NEAR_KICKOFF_CONSECUTIVE_TICKS
+                if delta_hours is not None and delta_hours <= STICKY_NEAR_KICKOFF_HOURS
+                else STICKY_REQUIRE_CONSECUTIVE_TICKS
+            )
+            if not sp.is_mature(
+                conn, str(market_id), event_start_utc, 0.0, tick_id, now_utc,
+                v_min=STICKY_V_MIN, t_min_hours=STICKY_T_MIN_HOURS, t_max_hours=STICKY_T_MAX_HOURS,
+                require_consecutive_ticks=require_ticks,
+            ):
+                continue
+            event_id = _get_attr(event, "id") if event else None
+            if event_id is not None:
+                event_id = str(event_id)
+            score = 0.0  # catalogue order is already by MAXIMUM_TRADED
+            candidates.append((str(market_id), event_id, event_start_utc, score))
+        # Step D — Fill capacity; upsert metadata for newly admitted
+        to_admit = [(mid, eid, est, sc) for mid, eid, est, sc in candidates]
+        admitted = sp.admit_markets(conn, to_admit, now_utc, STICKY_K)
+        catalogue_by_mid = {}
+        for c in catalogues:
+            mid = _get_attr(c, "market_id", "marketId")
+            if mid:
+                catalogue_by_mid[str(mid)] = c
+        for mid, _eid, _est, _sc in candidates[:admitted]:
+            c = catalogue_by_mid.get(mid)
+            if c:
+                meta_row = _extract_metadata_row(c)
+                if meta_row:
+                    _upsert_metadata(conn, meta_row)
+        # Record seen for next tick's maturity (2 consecutive ticks)
+        for c in catalogues:
+            mid = _get_attr(c, "market_id", "marketId")
+            if mid:
+                sp.record_seen(conn, str(mid), tick_id, now_utc)
+
+        tracked_after = len(sp.get_tracked_market_ids_set(conn))
+        duration_ms = int((time.monotonic() - start_ts) * 1000)
+        logger.info(
+            "[Sticky] tick_id=%s duration_ms=%s tracked_count=%s admitted_per_tick=%s expired=%s requests_per_tick=%s markets_polled=%s",
+            tick_id, duration_ms, tracked_after, admitted, expired, requests_this_tick, len(all_books),
+        )
+    except Exception as e:
+        logger.exception("Sticky tick failed: %s", e)
+    finally:
+        conn.close()
+
+    _touch_heartbeat_success()
+    return True
+
+
+def _fetch_catalogue_sticky(trading, start_ts: float):
+    """Catalogue for sticky pre-match: same filter as _fetch_catalogue but max_results = STICKY_CATALOGUE_MAX."""
+    from betfairlightweight import filters
+    if _past_deadline(start_ts):
+        raise TimeoutError("Tick deadline exceeded before catalogue")
+    now = datetime.now(timezone.utc)
+    from_ts = now - timedelta(minutes=LOOKBACK_MINUTES)
+    to_ts = now + timedelta(hours=WINDOW_HOURS)
+    time_range = filters.time_range(from_=from_ts, to=to_ts)
+    market_filter = filters.market_filter(
+        event_type_ids=[1],
+        market_type_codes=["MATCH_ODDS"],
+        market_start_time=time_range,
+    )
+    return trading.betting.list_market_catalogue(
+        filter=market_filter,
+        market_projection=[
+            "RUNNER_DESCRIPTION",
+            "MARKET_DESCRIPTION",
+            "EVENT",
+            "EVENT_TYPE",
+            "MARKET_START_TIME",
+            "COMPETITION",
+        ],
+        max_results=max(STICKY_CATALOGUE_MAX, STICKY_K),
+        sort="MAXIMUM_TRADED",
+    )
 
 
 def _run_single_shot(trading) -> bool:
@@ -1018,25 +1178,30 @@ def _run_single_shot(trading) -> bool:
                 total_matched=market_total_matched, inplay=inplay, status=status, depth_limit=DEPTH_LIMIT,
             )
             if snapshot_id is not None and len(runners) >= 3:
-                from risk import calculate_risk
+                from risk import compute_book_risk_l3
                 runner_metadata = _runner_metadata_from_metadata_table(conn, first_market_id)
                 if runner_metadata:
-                    result = calculate_risk(runners, runner_metadata, depth_limit=DEPTH_LIMIT, market_total_matched=market_total_matched)
-                    if result:
-                        hr, ar, dr, vol, _ = result
-                        best_prices = _runner_best_prices(runners, runner_metadata)
-                        def _s(b, l):
-                            return float(l) - float(b) if b is not None and l is not None else None
-                        home_spread = _s(best_prices.get("home_best_back"), best_prices.get("home_best_lay"))
-                        away_spread = _s(best_prices.get("away_best_back"), best_prices.get("away_best_lay"))
-                        draw_spread = _s(best_prices.get("draw_best_back"), best_prices.get("draw_best_lay"))
-                        metrics = {
-                            "home_risk": hr, "away_risk": ar, "draw_risk": dr, "total_volume": vol,
-                            "depth_limit": DEPTH_LIMIT, "calculation_version": "imbalance_v1",
-                            **best_prices,
-                            "home_spread": home_spread, "away_spread": away_spread, "draw_spread": draw_spread,
-                        }
-                        _insert_derived_metrics(conn, snapshot_id, snapshot_at, first_market_id, metrics)
+                    total_volume = _safe_float(market_total_matched) if market_total_matched is not None else sum(
+                        _safe_float(r.get("totalMatched") if isinstance(r, dict) else getattr(r, "totalMatched", None) or getattr(r, "total_matched", None))
+                        for r in runners
+                    )
+                    best_prices = _runner_best_prices(runners, runner_metadata)
+                    def _s(b, l):
+                        return float(l) - float(b) if b is not None and l is not None else None
+                    home_spread = _s(best_prices.get("home_best_back"), best_prices.get("home_best_lay"))
+                    away_spread = _s(best_prices.get("away_best_back"), best_prices.get("away_best_lay"))
+                    draw_spread = _s(best_prices.get("draw_best_back"), best_prices.get("draw_best_lay"))
+                    book_risk_l3 = compute_book_risk_l3(runners, runner_metadata, depth_limit=DEPTH_LIMIT)
+                    metrics = {
+                        "total_volume": total_volume,
+                        "depth_limit": DEPTH_LIMIT, "calculation_version": "v1",
+                        **best_prices,
+                        "home_spread": home_spread, "away_spread": away_spread, "draw_spread": draw_spread,
+                        "home_book_risk_l3": (book_risk_l3 or {}).get("home_book_risk_l3"),
+                        "away_book_risk_l3": (book_risk_l3 or {}).get("away_book_risk_l3"),
+                        "draw_book_risk_l3": (book_risk_l3 or {}).get("draw_book_risk_l3"),
+                    }
+                    _insert_derived_metrics(conn, snapshot_id, snapshot_at, first_market_id, metrics)
             conn.close()
         except Exception as e:
             logger.warning("3-layer persist failed: %s", e)
@@ -1089,13 +1254,20 @@ def main() -> int:
             logger.warning("Logout failed: %s", e)
         return 0
 
-    logger.info(
-        "Daemon started. Interval=%ds, deadline=%ds, window_hours=%s, lookback_min=%s, heartbeat_alive=%s",
-        INTERVAL_SECONDS, TICK_DEADLINE_SECONDS, WINDOW_HOURS, LOOKBACK_MINUTES, HEARTBEAT_ALIVE_PATH,
-    )
+    tick_fn = _tick_sticky_prematch if STICKY_PREMATCH else _tick
+    if STICKY_PREMATCH:
+        logger.info(
+            "Daemon started (STICKY PRE-MATCH). K=%s, kickoff_buffer=%ss, interval=%ds, catalogue_max=%s, batch_size=%s",
+            STICKY_K, STICKY_KICKOFF_BUFFER_SECONDS, INTERVAL_SECONDS, STICKY_CATALOGUE_MAX, MARKET_BOOK_BATCH_SIZE,
+        )
+    else:
+        logger.info(
+            "Daemon started. Interval=%ds, deadline=%ds, window_hours=%s, lookback_min=%s, heartbeat_alive=%s",
+            INTERVAL_SECONDS, TICK_DEADLINE_SECONDS, WINDOW_HOURS, LOOKBACK_MINUTES, HEARTBEAT_ALIVE_PATH,
+        )
 
     try:
-        _tick(_trading_client)
+        tick_fn(_trading_client)
     except Exception as e:
         logger.exception("Initial tick failed (non-fatal): %s", e)
 
@@ -1106,7 +1278,7 @@ def main() -> int:
         if _shutdown_requested:
             break
         try:
-            _tick(_trading_client)
+            tick_fn(_trading_client)
         except Exception as e:
             logger.exception("Cycle failed (non-fatal): %s", e)
 

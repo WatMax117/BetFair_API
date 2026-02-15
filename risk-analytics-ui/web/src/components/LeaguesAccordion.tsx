@@ -16,7 +16,6 @@ import { fetchLeagues, fetchLeagueEvents, fetchBookRiskFocusEvents } from '../ap
 import type { LeagueItem, EventItem } from '../api'
 
 const DEFAULT_WINDOW_HOURS = 24
-const DEFAULT_EXTREME_INDEX_THRESHOLD = 500
 const DEFAULT_IN_PLAY_LOOKBACK_HOURS = 6
 
 function getWindowDates(hours: number): { from: Date; to: Date } {
@@ -35,7 +34,6 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
   const [searchApplied, setSearchApplied] = useState<string | null>(null)
   const [includeInPlay, setIncludeInPlay] = useState(true)
   const [inPlayLookbackHours, setInPlayLookbackHours] = useState(DEFAULT_IN_PLAY_LOOKBACK_HOURS)
-  const [extremeThreshold, setExtremeThreshold] = useState(DEFAULT_EXTREME_INDEX_THRESHOLD)
   const [leagues, setLeagues] = useState<LeagueItem[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -221,15 +219,6 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
         )}
         <TextField
           size="small"
-          label="Index highlight threshold"
-          type="number"
-          value={extremeThreshold}
-          onChange={(e) => setExtremeThreshold(Number(e.target.value) || 0)}
-          inputProps={{ min: 0, step: 50 }}
-          sx={{ width: 160 }}
-        />
-        <TextField
-          size="small"
           label="Search (team / event)"
           placeholder="Enter term or leave blank"
           value={search}
@@ -302,7 +291,6 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
                 <EventsTable
                   events={eventsByLeague[league] || []}
                   onSelectEvent={onSelectEvent}
-                  extremeThreshold={extremeThreshold}
                   showLimitNote={(eventsByLeague[league]?.length ?? 0) >= DEFAULT_LIMIT}
                 />
               )}

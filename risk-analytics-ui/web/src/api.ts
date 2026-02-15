@@ -7,21 +7,8 @@ function toISO(d: Date): string {
 
 export type LeagueItem = { league: string; event_count: number }
 
-/** H/A/D triplet for Imbalance (risk) or Impedance. Same ordering: home, away, draw. */
+/** H/A/D triplet (e.g. Book Risk L3). Same ordering: home, away, draw. */
 export type HadTriplet = { home: number | null; away: number | null; draw: number | null }
-
-/** Raw inputs per outcome for Impedance: backStake, backOdds, backProfit (backer profit if back wins), layStake, layOdds, layLiability (layer exposure if selection wins). */
-export type ImpedanceInputsOutcome = {
-  backStake: number | null
-  backOdds: number | null
-  /** Backer's potential profit if back wins = (backOdds - 1) * backStake. */
-  backProfit: number | null
-  layStake: number | null
-  layOdds: number | null
-  /** Layer's maximum loss / exposure if selection wins = (layOdds - 1) * layStake. */
-  layLiability: number | null
-}
-export type ImpedanceInputs = { home: ImpedanceInputsOutcome; away: ImpedanceInputsOutcome; draw: ImpedanceInputsOutcome }
 
 export type EventItem = {
   market_id: string
@@ -29,9 +16,6 @@ export type EventItem = {
   event_open_date: string | null
   competition_name: string | null
   latest_snapshot_at: string | null
-  home_risk: number | null
-  away_risk: number | null
-  draw_risk: number | null
   home_best_back: number | null
   away_best_back: number | null
   draw_best_back: number | null
@@ -41,15 +25,6 @@ export type EventItem = {
   total_volume: number | null
   depth_limit: number | null
   calculation_version: string | null
-  /** Imbalance index (H/A/D) as a distinct object; same values as home_risk/away_risk/draw_risk. */
-  imbalance?: HadTriplet
-  /** Present when includeImpedance=true. Raw impedance per H/A/D (debug). */
-  impedance?: HadTriplet
-  /** Present when includeImpedance=true. Normalized impedance (prefer for UI). */
-  impedanceNorm?: HadTriplet
-  /** Present when includeImpedance=true and include_impedance_inputs=true. Raw inputs per outcome for auditing. */
-  impedanceInputs?: ImpedanceInputs
-  /** Book Risk L3 (H/A/D) from latest snapshot. Present in book-risk-focus endpoint. */
   home_book_risk_l3?: number | null
   away_book_risk_l3?: number | null
   draw_book_risk_l3?: number | null
@@ -63,26 +38,15 @@ export type TimeseriesPoint = {
   home_best_lay: number | null
   away_best_lay: number | null
   draw_best_lay: number | null
-  home_risk: number | null
-  away_risk: number | null
-  draw_risk: number | null
   total_volume: number | null
   depth_limit?: number | null
   calculation_version?: string | null
-  /** Imbalance index (H/A/D) as distinct object; same as home_risk/away_risk/draw_risk. */
-  imbalance?: HadTriplet
-  impedance?: HadTriplet
-  impedanceNorm?: HadTriplet
-  /** Raw inputs per outcome when include_impedance_inputs=true. */
-  impedanceInputs?: ImpedanceInputs
-  /** Best-level (L1) sizes: back and lay, for backSize/laySize columns and Size Impedance L1. */
   home_best_back_size_l1?: number | null
   away_best_back_size_l1?: number | null
   draw_best_back_size_l1?: number | null
   home_best_lay_size_l1?: number | null
   away_best_lay_size_l1?: number | null
   draw_best_lay_size_l1?: number | null
-  /** L2/L3 back levels (odds and size per outcome). */
   home_back_odds_l2?: number | null
   home_back_size_l2?: number | null
   home_back_odds_l3?: number | null
@@ -95,7 +59,6 @@ export type TimeseriesPoint = {
   draw_back_size_l2?: number | null
   draw_back_odds_l3?: number | null
   draw_back_size_l3?: number | null
-  /** 3-way Book Risk (exposure) at 3 levels: R[o]=W[o]-L[o]. >0 = book loses if outcome wins. */
   home_book_risk_l3?: number | null
   away_book_risk_l3?: number | null
   draw_book_risk_l3?: number | null
@@ -122,9 +85,6 @@ export type DebugSnapshotRow = {
   mbs_depth_limit: number | null
   mbs_source: string | null
   mbs_capture_version: string | null
-  home_risk: number | null
-  away_risk: number | null
-  draw_risk: number | null
   mdm_total_volume: number | null
   home_best_back: number | null
   away_best_back: number | null
@@ -169,16 +129,7 @@ export type DebugSnapshotRow = {
   home_best_back_size_l1?: number | null
   away_best_back_size_l1?: number | null
   draw_best_back_size_l1?: number | null
-  home_impedance?: number | null
-  away_impedance?: number | null
-  draw_impedance?: number | null
-  /** Timeseries uses impedance object; Debug uses flat home_impedance etc. */
-  impedance?: HadTriplet | null
-  /** Timeseries uses total_volume; Debug uses mdm_total_volume. */
   total_volume?: number | null
-  home_impedance_norm?: number | null
-  away_impedance_norm?: number | null
-  draw_impedance_norm?: number | null
   home_book_risk_l3?: number | null
   away_book_risk_l3?: number | null
   draw_book_risk_l3?: number | null
@@ -229,7 +180,6 @@ export async function fetchLeagueEvents(
   to: Date,
   includeInPlay = true,
   inPlayLookbackHours = 6,
-  includeImpedance = false,
   limit = 100,
   offset = 0
 ): Promise<EventItem[]> {
@@ -238,7 +188,6 @@ export async function fetchLeagueEvents(
     to_ts: toISO(to),
     include_in_play: String(includeInPlay),
     in_play_lookback_hours: String(inPlayLookbackHours),
-    include_impedance: String(includeImpedance),
     limit: String(limit),
     offset: String(offset),
   })
@@ -267,15 +216,12 @@ export async function fetchEventTimeseries(
   marketId: string,
   from: Date,
   to: Date,
-  intervalMinutes = 15,
-  includeImpedance = false
+  intervalMinutes = 15
 ): Promise<TimeseriesPoint[]> {
   const params = new URLSearchParams({
     from_ts: toISO(from),
     to_ts: toISO(to),
     interval_minutes: String(intervalMinutes),
-    include_impedance: String(includeImpedance),
-    include_impedance_inputs: String(includeImpedance), // Always include inputs when impedance is requested
   })
   const res = await fetch(
     `${API_BASE}/events/${encodeURIComponent(marketId)}/timeseries?${params}`
@@ -290,7 +236,6 @@ export async function fetchBookRiskFocusEvents(
   to: Date,
   includeInPlay = true,
   inPlayLookbackHours = 6,
-  includeImpedance = true,
   requireBookRisk = true,
   limit = 500,
   offset = 0
@@ -300,7 +245,6 @@ export async function fetchBookRiskFocusEvents(
     to_ts: toISO(to),
     include_in_play: String(includeInPlay),
     in_play_lookback_hours: String(inPlayLookbackHours),
-    include_impedance: String(includeImpedance),
     require_book_risk: String(requireBookRisk),
     limit: String(limit),
     offset: String(offset),
