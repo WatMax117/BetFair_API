@@ -459,6 +459,86 @@ def get_book_risk_focus_events(
     return [_row_to_event(r) for r in rows]
 
 
+@app.get("/events/by-date-snapshots")
+def get_events_by_date_snapshots(
+    date: str = Query(..., description="UTC date YYYY-MM-DD"),
+):
+    """
+    Snapshot-driven calendar: all events for the given UTC day that have at least one
+    snapshot in market_derived_metrics. No Book Risk filter, no limit. Deterministic by date.
+    """
+    try:
+        from_dt = datetime.strptime(date.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+    to_dt = from_dt + timedelta(days=1)
+
+    with cursor() as cur:
+        cur.execute(
+            """
+            WITH latest AS (
+                SELECT DISTINCT ON (d.market_id)
+                    d.market_id,
+                    d.snapshot_id,
+                    d.snapshot_at,
+                    d.home_book_risk_l3, d.away_book_risk_l3, d.draw_book_risk_l3,
+                    d.home_best_back, d.away_best_back, d.draw_best_back,
+                    d.home_best_lay, d.away_best_lay, d.draw_best_lay,
+                    d.total_volume,
+                    d.depth_limit,
+                    d.calculation_version
+                FROM market_derived_metrics d
+                ORDER BY d.market_id, d.snapshot_at DESC
+            )
+            SELECT
+                e.market_id,
+                e.event_id,
+                e.event_name,
+                e.event_open_date,
+                e.competition_name,
+                l.snapshot_at AS latest_snapshot_at,
+                l.home_book_risk_l3, l.away_book_risk_l3, l.draw_book_risk_l3,
+                l.home_best_back, l.away_best_back, l.draw_best_back,
+                l.home_best_lay, l.away_best_lay, l.draw_best_lay,
+                l.total_volume,
+                l.depth_limit,
+                l.calculation_version
+            FROM market_event_metadata e
+            JOIN latest l ON l.market_id = e.market_id
+            WHERE e.event_open_date IS NOT NULL
+              AND e.event_open_date >= %s
+              AND e.event_open_date < %s
+            ORDER BY e.event_open_date ASC, e.market_id ASC
+            """,
+            (from_dt, to_dt),
+        )
+        rows = cur.fetchall()
+
+    def _row_to_event(r: Any) -> dict:
+        return {
+            "market_id": r["market_id"],
+            "event_id": r.get("event_id"),
+            "event_name": r["event_name"],
+            "event_open_date": r["event_open_date"].isoformat() if r.get("event_open_date") else None,
+            "competition_name": r["competition_name"],
+            "latest_snapshot_at": r["latest_snapshot_at"].isoformat() if r.get("latest_snapshot_at") else None,
+            "home_book_risk_l3": _opt_float(r.get("home_book_risk_l3")),
+            "away_book_risk_l3": _opt_float(r.get("away_book_risk_l3")),
+            "draw_book_risk_l3": _opt_float(r.get("draw_book_risk_l3")),
+            "home_best_back": float(r["home_best_back"]) if r.get("home_best_back") is not None else None,
+            "away_best_back": float(r["away_best_back"]) if r.get("away_best_back") is not None else None,
+            "draw_best_back": float(r["draw_best_back"]) if r.get("draw_best_back") is not None else None,
+            "home_best_lay": float(r["home_best_lay"]) if r.get("home_best_lay") is not None else None,
+            "away_best_lay": float(r["away_best_lay"]) if r.get("away_best_lay") is not None else None,
+            "draw_best_lay": float(r["draw_best_lay"]) if r.get("draw_best_lay") is not None else None,
+            "total_volume": float(r["total_volume"]) if r.get("total_volume") is not None else None,
+            "depth_limit": r.get("depth_limit"),
+            "calculation_version": r.get("calculation_version"),
+        }
+
+    return [_row_to_event(r) for r in rows]
+
+
 @app.get("/events/{market_id}/timeseries")
 def get_event_timeseries(
     market_id: str,

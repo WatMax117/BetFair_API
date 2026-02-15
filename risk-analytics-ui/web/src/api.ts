@@ -254,6 +254,14 @@ export async function fetchBookRiskFocusEvents(
   return res.json()
 }
 
+/** Snapshot-driven calendar: all events for a UTC day that have at least one snapshot. No limit, no Book Risk filter. */
+export async function fetchEventsByDateSnapshots(date: string): Promise<EventItem[]> {
+  const params = new URLSearchParams({ date: date.trim() })
+  const res = await fetch(`${API_BASE}/events/by-date-snapshots?${params}`)
+  if (!res.ok) throw new Error(res.statusText)
+  return res.json()
+}
+
 /** Debug: per-snapshot rows for a market (no raw_payload). Lazy-load when market selected. */
 export async function fetchMarketSnapshots(
   marketId: string,

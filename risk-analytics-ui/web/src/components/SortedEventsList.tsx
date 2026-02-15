@@ -22,6 +22,7 @@ const SORT_KEYS = [
   { id: 'book_risk_away', label: 'Book Risk L3 Away', getVal: (e: EventItem) => e.away_book_risk_l3 ?? null },
   { id: 'book_risk_draw', label: 'Book Risk L3 Draw', getVal: (e: EventItem) => e.draw_book_risk_l3 ?? null },
   { id: 'volume', label: 'Volume', getVal: (e: EventItem) => e.total_volume ?? null },
+  { id: 'event_open_date', label: 'Event Open Date', getVal: (e: EventItem) => e.event_open_date ?? null },
 ] as const
 
 export type SortField = (typeof SORT_KEYS)[number]['id']
@@ -89,6 +90,7 @@ export function SortedEventsList({
   onOnlyActiveChange,
   onlyMarketsWithBookRisk = true,
   onOnlyMarketsWithBookRiskChange,
+  showCalendarColumns = false,
 }: {
   events: EventItem[]
   sortState: SortState
@@ -98,22 +100,26 @@ export function SortedEventsList({
   onOnlyActiveChange?: (v: boolean) => void
   onlyMarketsWithBookRisk?: boolean
   onOnlyMarketsWithBookRiskChange?: (v: boolean) => void
+  showCalendarColumns?: boolean
 }) {
   const sorted = useMemo(() => {
     const key = SORT_KEYS.find((k) => k.id === sortState.field)
     if (!key) return [...events]
 
-    const getPrimary = (e: EventItem) => {
+    const getPrimary = (e: EventItem): number | string => {
       const v = key.getVal(e)
-      if (key.id === 'volume') return v ?? (sortState.desc ? -Infinity : Infinity)
-      return sortValue(v, sortState.signed, sortState.desc)
+      if (key.id === 'volume') return (v as number) ?? (sortState.desc ? -Infinity : Infinity)
+      if (key.id === 'event_open_date') return (v as string) ?? (sortState.desc ? '' : '\uffff')
+      return sortValue(v as number | null, sortState.signed, sortState.desc)
     }
 
     return [...events].sort((a, b) => {
       const pa = getPrimary(a)
       const pb = getPrimary(b)
       let cmp = 0
-      if (pa < pb) cmp = -1
+      if (typeof pa === 'string' && typeof pb === 'string') {
+        cmp = pa.localeCompare(pb)
+      } else if (pa < pb) cmp = -1
       else if (pa > pb) cmp = 1
       else {
         const va = a.total_volume ?? 0
@@ -228,12 +234,14 @@ export function SortedEventsList({
           <TableHead>
             <TableRow>
               <TableCell>Event</TableCell>
+              {showCalendarColumns && <TableCell>Competition</TableCell>}
+              <TableCell>Event Open Date (UTC)</TableCell>
+              {showCalendarColumns && <TableCell>Latest Snapshot Time</TableCell>}
               <TableCell>Market ID</TableCell>
               <TableCell align="right">Book Risk H</TableCell>
               <TableCell align="right">Book Risk A</TableCell>
               <TableCell align="right">Book Risk D</TableCell>
               <TableCell align="right">Volume</TableCell>
-              <TableCell>Open date</TableCell>
             </TableRow>
           </TableHead>
           <TableBody>
@@ -245,6 +253,9 @@ export function SortedEventsList({
                 onClick={() => onSelectEvent(e)}
               >
                 <TableCell>{e.event_name || e.market_id}</TableCell>
+                {showCalendarColumns && <TableCell>{e.competition_name ?? '—'}</TableCell>}
+                <TableCell>{formatTime(e.event_open_date)}</TableCell>
+                {showCalendarColumns && <TableCell>{formatTime(e.latest_snapshot_at)}</TableCell>}
                 <TableCell>
                   <Link
                     component="button"
@@ -261,7 +272,6 @@ export function SortedEventsList({
                 <TableCell align="right">{num(e.away_book_risk_l3 ?? null)}</TableCell>
                 <TableCell align="right">{num(e.draw_book_risk_l3 ?? null)}</TableCell>
                 <TableCell align="right">{num(e.total_volume ?? null)}</TableCell>
-                <TableCell>{formatTime(e.event_open_date)}</TableCell>
               </TableRow>
             ))}
           </TableBody>
