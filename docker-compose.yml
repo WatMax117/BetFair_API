@@ -134,6 +134,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-netbet}
       POSTGRES_USER: ${POSTGRES_ANALYTICS_READER_USER:-netbet_analytics_reader}
       POSTGRES_PASSWORD: ${POSTGRES_ANALYTICS_READER_PASSWORD}
+      # Partition provisioner (stream_ingest.ladder_levels): table owner (default: stream writer)
+      POSTGRES_PARTITION_USER: ${POSTGRES_PARTITION_USER:-netbet_stream_writer}
+      POSTGRES_PARTITION_PASSWORD: ${POSTGRES_STREAM_WRITER_PASSWORD}
       PGOPTIONS: -c search_path=public,analytics
     ports:
       - "8000:8000"

@@ -20,11 +20,24 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 
 from app.db import cursor
+from app.stream_router import stream_router
+from app.partition_provisioner import (
+    start_background_provisioner,
+    get_horizon_for_health,
+    HORIZON_DEGRADE_THRESHOLD_DAYS,
+)
 
 # Max size for raw_payload in response to avoid huge payloads (IDE/agent serialization issues)
 RAW_PAYLOAD_MAX_BYTES = 50 * 1024  # 50 KB
 
 app = FastAPI(title="Risk Analytics API", version="1.0.0")
+app.include_router(stream_router, prefix="/stream")
+
+
+@app.on_event("startup")
+def startup_partition_provisioner():
+    """Start partition provisioner (stream_ingest.ladder_levels) on startup + every 12h."""
+    start_background_provisioner()
 app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(
     CORSMiddleware,
@@ -218,7 +231,25 @@ def _compute_roi_toxic(out: dict[str, Any]) -> dict[str, Optional[float]]:
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    horizon_days = get_horizon_for_health()
+    payload = {"status": "ok"}
+    if horizon_days is not None:
+        payload["ladder_levels_partition_horizon_days"] = round(horizon_days, 1)
+        if horizon_days < HORIZON_DEGRADE_THRESHOLD_DAYS:
+            payload["status"] = "degraded"
+            payload["detail"] = "partition horizon below threshold (stream_ingest.ladder_levels)"
+    return payload
+
+
+@app.get("/metrics")
+def metrics():
+    """Lightweight metrics for partition horizon (alert if ladder_levels_partition_horizon_days < 7)."""
+    horizon_days = get_horizon_for_health()
+    value = round(horizon_days, 1) if horizon_days is not None else -1.0
+    body = "# HELP ladder_levels_partition_horizon_days Days of partition coverage ahead (stream_ingest.ladder_levels). Alert if < 7.\n"
+    body += "# TYPE ladder_levels_partition_horizon_days gauge\n"
+    body += f"ladder_levels_partition_horizon_days {value}\n"
+    return Response(content=body, media_type="text/plain; charset=utf-8")
 
 
 @app.get("/leagues")
