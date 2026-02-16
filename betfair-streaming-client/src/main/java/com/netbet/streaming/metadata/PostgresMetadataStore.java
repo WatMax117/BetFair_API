@@ -39,9 +39,10 @@ public class PostgresMetadataStore {
             "NEXT_GOAL", "NEXT_GOAL"
     );
 
-    private static final String INSERT_EVENT = "INSERT INTO events (event_id, event_name, home_team, away_team, open_date) VALUES (?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING";
-    private static final String INSERT_MARKET = "INSERT INTO markets (market_id, event_id, market_type, segment, market_name, market_start_time, total_matched) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (market_id) DO UPDATE SET segment = COALESCE(EXCLUDED.segment, markets.segment), total_matched = COALESCE(EXCLUDED.total_matched, markets.total_matched)";
-    private static final String INSERT_RUNNER = "INSERT INTO runners (market_id, selection_id, runner_name) VALUES (?, ?, ?) ON CONFLICT (market_id, selection_id) DO NOTHING";
+    // Schema-qualified SQL to ensure metadata writes go to public schema (not stream_ingest)
+    private static final String INSERT_EVENT = "INSERT INTO public.events (event_id, event_name, home_team, away_team, open_date) VALUES (?, ?, ?, ?, ?) ON CONFLICT (event_id) DO NOTHING";
+    private static final String INSERT_MARKET = "INSERT INTO public.markets (market_id, event_id, market_type, segment, market_name, market_start_time, total_matched) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (market_id) DO UPDATE SET segment = COALESCE(EXCLUDED.segment, public.markets.segment), total_matched = COALESCE(EXCLUDED.total_matched, public.markets.total_matched)";
+    private static final String INSERT_RUNNER = "INSERT INTO public.runners (market_id, selection_id, runner_name) VALUES (?, ?, ?) ON CONFLICT (market_id, selection_id) DO NOTHING";
 
     private final JdbcTemplate jdbc;
 

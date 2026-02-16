@@ -965,8 +965,13 @@ def _tick_sticky_prematch(trading) -> bool:
             return len(m.get("runners") or getattr(m, "runners", None) or [])
         catalogues = [c for c in catalogues if _runner_count(c) == 3]
         tracked_ids = sp.get_tracked_market_ids_set(conn)
+        tracked_count = len(tracked_ids)
+        catalogue_candidates = sum(
+            1 for c in catalogues
+            if _get_attr(c, "market_id", "marketId") and str(_get_attr(c, "market_id", "marketId")) not in tracked_ids
+        )
         # Build candidate list (is_mature uses seen_markets from *previous* ticks; record_seen after)
-        # so "2 consecutive ticks" = seen at tick_id-1 and now at tick_id
+        # When under K, use 1-tick maturity for all to fill to 200; else use near-kickoff relaxation or 2 ticks.
         def _parse_event_start(ev):
             if ev is None:
                 return None
@@ -990,13 +995,16 @@ def _tick_sticky_prematch(trading) -> bool:
             event = _get_attr(c, "event", "event")
             event_start_raw = _get_attr(event, "open_date", "openDate") if event else None
             event_start_utc = _parse_event_start(event_start_raw)
-            # Relax maturity for near-kickoff: 1 consecutive tick when kickoff within N hours
-            delta_hours = (event_start_utc - now_utc).total_seconds() / 3600.0 if event_start_utc else None
-            require_ticks = (
-                STICKY_NEAR_KICKOFF_CONSECUTIVE_TICKS
-                if delta_hours is not None and delta_hours <= STICKY_NEAR_KICKOFF_HOURS
-                else STICKY_REQUIRE_CONSECUTIVE_TICKS
-            )
+            # Fill to K: when under K, allow 1-tick maturity for all; else near-kickoff 1 tick or 2 ticks
+            if tracked_count < STICKY_K:
+                require_ticks = 1
+            else:
+                delta_hours = (event_start_utc - now_utc).total_seconds() / 3600.0 if event_start_utc else None
+                require_ticks = (
+                    STICKY_NEAR_KICKOFF_CONSECUTIVE_TICKS
+                    if delta_hours is not None and delta_hours <= STICKY_NEAR_KICKOFF_HOURS
+                    else STICKY_REQUIRE_CONSECUTIVE_TICKS
+                )
             if not sp.is_mature(
                 conn, str(market_id), event_start_utc, 0.0, tick_id, now_utc,
                 v_min=STICKY_V_MIN, t_min_hours=STICKY_T_MIN_HOURS, t_max_hours=STICKY_T_MAX_HOURS,
@@ -1008,6 +1016,7 @@ def _tick_sticky_prematch(trading) -> bool:
                 event_id = str(event_id)
             score = 0.0  # catalogue order is already by MAXIMUM_TRADED
             candidates.append((str(market_id), event_id, event_start_utc, score))
+        matured_candidates = len(candidates)
         # Step D — Fill capacity; upsert metadata for newly admitted
         to_admit = [(mid, eid, est, sc) for mid, eid, est, sc in candidates]
         admitted = sp.admit_markets(conn, to_admit, now_utc, STICKY_K)
@@ -1031,8 +1040,8 @@ def _tick_sticky_prematch(trading) -> bool:
         tracked_after = len(sp.get_tracked_market_ids_set(conn))
         duration_ms = int((time.monotonic() - start_ts) * 1000)
         logger.info(
-            "[Sticky] tick_id=%s duration_ms=%s tracked_count=%s admitted_per_tick=%s expired=%s requests_per_tick=%s markets_polled=%s",
-            tick_id, duration_ms, tracked_after, admitted, expired, requests_this_tick, len(all_books),
+            "[Sticky] tick_id=%s duration_ms=%s tracked_count=%s admitted_per_tick=%s expired=%s catalogue_candidates=%s matured_candidates=%s requests_per_tick=%s markets_polled=%s",
+            tick_id, duration_ms, tracked_after, admitted, expired, catalogue_candidates, matured_candidates, requests_this_tick, len(all_books),
         )
     except Exception as e:
         logger.exception("Sticky tick failed: %s", e)

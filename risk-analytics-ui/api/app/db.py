@@ -7,8 +7,13 @@ from contextlib import contextmanager
 POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "localhost")
 POSTGRES_PORT = int(os.environ.get("POSTGRES_PORT", "5432"))
 POSTGRES_DB = os.environ.get("POSTGRES_DB", "netbet")
-POSTGRES_USER = os.environ.get("POSTGRES_USER", "netbet")
-POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "")
+POSTGRES_USER = os.environ.get(
+    "POSTGRES_ANALYTICS_READER_USER",
+    os.environ.get("POSTGRES_USER", "netbet_analytics_reader"),
+)
+POSTGRES_PASSWORD = os.environ.get("POSTGRES_ANALYTICS_READER_PASSWORD") or os.environ.get(
+    "POSTGRES_PASSWORD", ""
+)
 
 
 def get_conn_kwargs():

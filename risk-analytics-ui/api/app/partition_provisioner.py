@@ -27,16 +27,28 @@ logger = logging.getLogger(__name__)
 
 
 def _get_partition_conn_kwargs():
-    """Connection for DDL (create partitions). Uses partition-manager user if set, else main API user."""
-    base = get_conn_kwargs()
+    """
+    Connection for DDL (create partitions). Uses dedicated partition-manager user.
+    Requires POSTGRES_PARTITION_USER and POSTGRES_PARTITION_PASSWORD to be set.
+    Does not fall back to stream writer or main API user credentials.
+    """
     user = os.environ.get("POSTGRES_PARTITION_USER")
     password = os.environ.get("POSTGRES_PARTITION_PASSWORD")
-    if user:
-        base = {**base, "user": user, "password": password or ""}
-    return base
+    if not user or not password:
+        raise ValueError(
+            "POSTGRES_PARTITION_USER and POSTGRES_PARTITION_PASSWORD must be set "
+            "for partition provisioning (DDL requires dedicated credentials)"
+        )
+    base = get_conn_kwargs()
+    return {
+        **base,
+        "user": user,
+        "password": password,
+    }
 
 # Stable bigint for advisory lock (unique to this maintenance task)
-PARTITION_PROVISIONER_LOCK_ID = 0x504152545F50524F56  # "PART_PROV" in hex
+# Using a simple numeric value within PostgreSQL bigint range (signed 64-bit)
+PARTITION_PROVISIONER_LOCK_ID = 1234567890123456
 DAYS_AHEAD = int(os.environ.get("PARTITION_DAYS_AHEAD", "30"))
 PARTITION_INTERVAL_HOURS = float(os.environ.get("PARTITION_INTERVAL_HOURS", "12"))
 
@@ -116,9 +128,10 @@ def run_provisioning() -> Tuple[bool, List[str], Optional[float]]:
         conn = psycopg2.connect(**_get_partition_conn_kwargs(), cursor_factory=RealDictCursor)
         cur = conn.cursor()
 
-        # Try advisory lock (session-scoped)
-        cur.execute("SELECT pg_try_advisory_lock(%s)", (PARTITION_PROVISIONER_LOCK_ID,))
-        if not cur.fetchone()[0]:
+        # Try advisory lock (session-scoped) - cast to bigint
+        cur.execute("SELECT pg_try_advisory_lock(%s::bigint) AS acquired", (PARTITION_PROVISIONER_LOCK_ID,))
+        row = cur.fetchone()
+        if not row or not row.get("acquired", False):
             logger.info("partition provisioning skipped (lock held by another instance)")
             horizon = get_partition_horizon_days()
             return False, [], horizon
@@ -126,6 +139,24 @@ def run_provisioning() -> Tuple[bool, List[str], Optional[float]]:
         logger.info("partition provisioning acquired lock")
 
         try:
+            # Verify the table is partitioned (relkind = 'p')
+            cur.execute(
+                """
+                SELECT relkind FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = 'stream_ingest' AND c.relname = 'ladder_levels'
+                """
+            )
+            table_info = cur.fetchone()
+            if not table_info or table_info.get("relkind") != "p":
+                logger.error(
+                    "partition provisioning skipped: stream_ingest.ladder_levels is not a partitioned table "
+                    "(relkind=%s). The table must be converted to partitioned before partition provisioning can work.",
+                    table_info.get("relkind") if table_info else "not found",
+                )
+                horizon = get_partition_horizon_days()
+                return False, [], horizon
+
             today = _today_utc()
             end_date = today + timedelta(days=DAYS_AHEAD)
             parent = sql.SQL(".").join([sql.Identifier("stream_ingest"), sql.Identifier("ladder_levels")])
@@ -170,7 +201,7 @@ def run_provisioning() -> Tuple[bool, List[str], Optional[float]]:
 
             return True, created, float(horizon_days)
         finally:
-            cur.execute("SELECT pg_advisory_unlock(%s)", (PARTITION_PROVISIONER_LOCK_ID,))
+            cur.execute("SELECT pg_advisory_unlock(%s::bigint)", (PARTITION_PROVISIONER_LOCK_ID,))
             conn.commit()
     except Exception as e:
         logger.exception("partition provisioning failed: %s", e)

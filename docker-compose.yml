@@ -52,15 +52,20 @@ services:
       postgres:
         condition: service_healthy
     env_file:
+      - ./.env
       - ./auth-service/.env
     environment:
       - BETFAIR_TOKEN_URL=http://auth-service:8080/token
       - betfair.csv-logging.output-dir=/app/logs
       - SERVER_PORT=8081
-      - SPRING_DATASOURCE_URL=jdbc:postgresql://postgres:5432/${POSTGRES_DB:-netbet}?currentSchema=stream_ingest
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://netbet-postgres:5432/${POSTGRES_DB:-netbet}?currentSchema=stream_ingest
       - SPRING_DATASOURCE_USERNAME=${POSTGRES_STREAM_WRITER_USER:-netbet_stream_writer}
       - SPRING_DATASOURCE_PASSWORD=${POSTGRES_STREAM_WRITER_PASSWORD}
       - BETFAIR_POSTGRES_SINK_ENABLED=${BETFAIR_POSTGRES_SINK_ENABLED:-true}
+      # Flyway baseline for existing stream_ingest schema (production): do not run V1–V5
+      - SPRING_FLYWAY_BASELINE_ON_MIGRATE=${SPRING_FLYWAY_BASELINE_ON_MIGRATE:-true}
+      - SPRING_FLYWAY_BASELINE_VERSION=${SPRING_FLYWAY_BASELINE_VERSION:-5}
+      - SPRING_FLYWAY_SCHEMAS=${SPRING_FLYWAY_SCHEMAS:-stream_ingest}
     volumes:
       - /opt/netbet/logs:/app/logs
     ports:
@@ -134,9 +139,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-netbet}
       POSTGRES_USER: ${POSTGRES_ANALYTICS_READER_USER:-netbet_analytics_reader}
       POSTGRES_PASSWORD: ${POSTGRES_ANALYTICS_READER_PASSWORD}
-      # Partition provisioner (stream_ingest.ladder_levels): table owner (default: stream writer)
-      POSTGRES_PARTITION_USER: ${POSTGRES_PARTITION_USER:-netbet_stream_writer}
-      POSTGRES_PARTITION_PASSWORD: ${POSTGRES_STREAM_WRITER_PASSWORD}
+      # Partition provisioner (stream_ingest.ladder_levels): dedicated user (default: netbet)
+      POSTGRES_PARTITION_USER: ${POSTGRES_PARTITION_USER:-netbet}
+      POSTGRES_PARTITION_PASSWORD: ${POSTGRES_PARTITION_PASSWORD:-${POSTGRES_PASSWORD}}
       PGOPTIONS: -c search_path=public,analytics
     ports:
       - "8000:8000"

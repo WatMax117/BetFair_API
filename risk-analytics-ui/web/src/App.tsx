@@ -6,9 +6,13 @@ import type { EventItem } from './api'
 
 export default function App() {
   const [selectedEvent, setSelectedEvent] = useState<EventItem | null>(null)
+  const [selectedDate, setSelectedDate] = useState<string | null>(null)
 
-  const handleSelectEvent = useCallback((event: EventItem | null) => {
+  const handleSelectEvent = useCallback((event: EventItem | null, date?: string) => {
     setSelectedEvent(event)
+    if (date) {
+      setSelectedDate(date)
+    }
   }, [])
 
   if (selectedEvent) {
@@ -19,6 +23,7 @@ export default function App() {
           eventName={selectedEvent.event_name}
           competitionName={selectedEvent.competition_name}
           eventOpenDate={selectedEvent.event_open_date}
+          selectedDate={selectedDate}
           onBack={() => setSelectedEvent(null)}
         />
       </Box>
@@ -27,7 +32,7 @@ export default function App() {
 
   return (
     <Box sx={{ p: 2, maxWidth: 1400, mx: 'auto' }}>
-      <LeaguesAccordion onSelectEvent={handleSelectEvent} />
+      <LeaguesAccordion onSelectEvent={(event) => handleSelectEvent(event)} onDateChange={setSelectedDate} />
     </Box>
   )
 }

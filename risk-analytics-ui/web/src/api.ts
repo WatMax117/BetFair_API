@@ -1,5 +1,22 @@
-// Base path for API (e.g. /api). No trailing slash. Requests go to ${API_BASE}/leagues etc.
-const API_BASE = import.meta.env.VITE_API_URL ?? '/api'
+// Base path for API (e.g. /api or /api/stream for stream UI). No trailing slash.
+// When window.__API_BASE__ is set (e.g. by /stream route), that is used so the same app can call stream endpoints.
+function getApiBase(): string {
+  if (typeof window !== 'undefined') {
+    const win = window as unknown as { __API_BASE__?: string }
+    if (win.__API_BASE__) {
+      console.log('[api] getApiBase: using window.__API_BASE__', win.__API_BASE__)
+      return win.__API_BASE__
+    }
+  }
+  const defaultBase = import.meta.env.VITE_API_URL ?? '/api'
+  console.log('[api] getApiBase: using default', defaultBase, 'pathname:', typeof window !== 'undefined' ? window.location.pathname : 'N/A')
+  // If we're on /stream route but __API_BASE__ wasn't set, force it
+  if (typeof window !== 'undefined' && window.location.pathname.startsWith('/stream')) {
+    console.warn('[api] getApiBase: on /stream route but __API_BASE__ not set, forcing /api/stream')
+    return '/api/stream'
+  }
+  return defaultBase
+}
 
 function toISO(d: Date): string {
   return d.toISOString()
@@ -41,6 +58,14 @@ export type TimeseriesPoint = {
   total_volume: number | null
   depth_limit?: number | null
   calculation_version?: string | null
+  // 15-minute bucket medians (new)
+  home_back_odds_median?: number | null
+  home_back_size_median?: number | null
+  away_back_odds_median?: number | null
+  away_back_size_median?: number | null
+  draw_back_odds_median?: number | null
+  draw_back_size_median?: number | null
+  // Legacy L1/L2/L3 fields (deprecated, kept for compatibility)
   home_best_back_size_l1?: number | null
   away_best_back_size_l1?: number | null
   draw_best_back_size_l1?: number | null
@@ -62,6 +87,24 @@ export type TimeseriesPoint = {
   home_book_risk_l3?: number | null
   away_book_risk_l3?: number | null
   draw_book_risk_l3?: number | null
+  // Impedance Index (15m) from medians only
+  impedance_index_15m?: number | null
+  impedance_abs_diff_home?: number | null
+  impedance_abs_diff_away?: number | null
+  impedance_abs_diff_draw?: number | null
+}
+
+export type TickRow = {
+  publish_time: string | null
+  selection_id: number | null
+  back_odds: number | null
+  back_size: number | null
+  home_back_odds: number | null
+  home_back_size: number | null
+  away_back_odds: number | null
+  away_back_size: number | null
+  draw_back_odds: number | null
+  draw_back_size: number | null
 }
 
 export type EventMeta = {
@@ -161,7 +204,7 @@ export async function fetchLeagues(
     offset: String(offset),
   })
   if (q?.trim()) params.set('q', q.trim())
-  const url = `${API_BASE}/leagues?${params}`
+  const url = `${getApiBase()}/leagues?${params}`
   console.log('[api] fetchLeagues request', url)
   const res = await fetch(url)
   const raw = await res.text()
@@ -192,24 +235,74 @@ export async function fetchLeagueEvents(
     offset: String(offset),
   })
   const res = await fetch(
-    `${API_BASE}/leagues/${encodeURIComponent(league)}/events?${params}`
+    `${getApiBase()}/leagues/${encodeURIComponent(league)}/events?${params}`
   )
   if (!res.ok) throw new Error(res.statusText)
   return res.json()
 }
 
 export async function fetchEventMeta(marketId: string): Promise<EventMeta> {
-  const res = await fetch(`${API_BASE}/events/${encodeURIComponent(marketId)}/meta`)
-  if (!res.ok) throw new Error(res.statusText)
-  return res.json()
+  const apiBase = getApiBase()
+  const url = `${apiBase}/events/${encodeURIComponent(marketId)}/meta`
+  console.log('[api] fetchEventMeta request', { apiBase, marketId, url })
+  const res = await fetch(url)
+  const raw = await res.text()
+  console.log('[api] fetchEventMeta response', { 
+    status: res.status, 
+    statusText: res.statusText,
+    bodyLength: raw.length, 
+    bodyPreview: raw.slice(0, 500) 
+  })
+  if (!res.ok) {
+    console.error('[api] fetchEventMeta error', { status: res.status, statusText: res.statusText, body: raw })
+    throw new Error(res.statusText)
+  }
+  let parsed: unknown = null
+  try {
+    parsed = JSON.parse(raw)
+  } catch (e) {
+    console.error('[api] fetchEventMeta json parse failed', e)
+    throw new Error('Invalid JSON response')
+  }
+  console.log('[api] fetchEventMeta parsed', { 
+    parsedType: typeof parsed,
+    hasKeys: typeof parsed === 'object' && parsed !== null ? Object.keys(parsed) : null
+  })
+  return parsed as EventMeta
 }
 
 export async function fetchEventLatestRaw(
   marketId: string
 ): Promise<{ market_id: string; snapshot_at: string | null; raw_payload: unknown }> {
-  const res = await fetch(`${API_BASE}/events/${encodeURIComponent(marketId)}/latest_raw`)
-  if (!res.ok) throw new Error(res.statusText)
-  return res.json()
+  const apiBase = getApiBase()
+  const url = `${apiBase}/events/${encodeURIComponent(marketId)}/latest_raw`
+  console.log('[api] fetchEventLatestRaw request', { apiBase, marketId, url })
+  const res = await fetch(url)
+  const raw = await res.text()
+  console.log('[api] fetchEventLatestRaw response', { 
+    status: res.status, 
+    statusText: res.statusText,
+    bodyLength: raw.length, 
+    bodyPreview: raw.slice(0, 500) 
+  })
+  if (!res.ok) {
+    console.error('[api] fetchEventLatestRaw error', { status: res.status, statusText: res.statusText, body: raw })
+    throw new Error(res.statusText)
+  }
+  let parsed: unknown = null
+  try {
+    parsed = JSON.parse(raw)
+  } catch (e) {
+    console.error('[api] fetchEventLatestRaw json parse failed', e)
+    throw new Error('Invalid JSON response')
+  }
+  console.log('[api] fetchEventLatestRaw parsed', { 
+    parsedType: typeof parsed,
+    hasMarketId: typeof parsed === 'object' && parsed !== null && 'market_id' in parsed,
+    hasSnapshotAt: typeof parsed === 'object' && parsed !== null && 'snapshot_at' in parsed,
+    hasRawPayload: typeof parsed === 'object' && parsed !== null && 'raw_payload' in parsed
+  })
+  return parsed as { market_id: string; snapshot_at: string | null; raw_payload: unknown }
 }
 
 export async function fetchEventTimeseries(
@@ -218,16 +311,51 @@ export async function fetchEventTimeseries(
   to: Date,
   intervalMinutes = 15
 ): Promise<TimeseriesPoint[]> {
+  const apiBase = getApiBase()
   const params = new URLSearchParams({
     from_ts: toISO(from),
     to_ts: toISO(to),
     interval_minutes: String(intervalMinutes),
   })
-  const res = await fetch(
-    `${API_BASE}/events/${encodeURIComponent(marketId)}/timeseries?${params}`
-  )
-  if (!res.ok) throw new Error(res.statusText)
-  return res.json()
+  const url = `${apiBase}/events/${encodeURIComponent(marketId)}/timeseries?${params}`
+  console.log('[api] fetchEventTimeseries request', { 
+    apiBase, 
+    marketId, 
+    from: from.toISOString(), 
+    to: to.toISOString(), 
+    intervalMinutes,
+    url 
+  })
+  const res = await fetch(url)
+  const raw = await res.text()
+  console.log('[api] fetchEventTimeseries response', { 
+    status: res.status, 
+    statusText: res.statusText,
+    bodyLength: raw.length, 
+    bodyPreview: raw.slice(0, 500) 
+  })
+  if (!res.ok) {
+    console.error('[api] fetchEventTimeseries error', { status: res.status, statusText: res.statusText, body: raw })
+    throw new Error(res.statusText)
+  }
+  let parsed: unknown = null
+  try {
+    parsed = JSON.parse(raw)
+  } catch (e) {
+    console.error('[api] fetchEventTimeseries json parse failed', e)
+    throw new Error('Invalid JSON response')
+  }
+  console.log('[api] fetchEventTimeseries parsed', { 
+    parsedType: typeof parsed,
+    isArray: Array.isArray(parsed), 
+    length: Array.isArray(parsed) ? parsed.length : null,
+    firstItemKeys: Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'object' && parsed[0] !== null ? Object.keys(parsed[0]) : null
+  })
+  if (!Array.isArray(parsed)) {
+    console.warn('[api] fetchEventTimeseries response is not an array', { type: typeof parsed })
+    return []
+  }
+  return parsed as TimeseriesPoint[]
 }
 
 /** Book Risk focus: all events in window with latest metrics including Book Risk L3. */
@@ -249,17 +377,47 @@ export async function fetchBookRiskFocusEvents(
     limit: String(limit),
     offset: String(offset),
   })
-  const res = await fetch(`${API_BASE}/events/book-risk-focus?${params}`)
+  const res = await fetch(`${getApiBase()}/events/book-risk-focus?${params}`)
   if (!res.ok) throw new Error(res.statusText)
   return res.json()
 }
 
 /** Snapshot-driven calendar: all events for a UTC day that have at least one snapshot. No limit, no Book Risk filter. */
 export async function fetchEventsByDateSnapshots(date: string): Promise<EventItem[]> {
+  const apiBase = getApiBase()
   const params = new URLSearchParams({ date: date.trim() })
-  const res = await fetch(`${API_BASE}/events/by-date-snapshots?${params}`)
-  if (!res.ok) throw new Error(res.statusText)
-  return res.json()
+  const url = `${apiBase}/events/by-date-snapshots?${params}`
+  console.log('[api] fetchEventsByDateSnapshots request', { apiBase, date: date.trim(), url })
+  const res = await fetch(url)
+  const raw = await res.text()
+  console.log('[api] fetchEventsByDateSnapshots response', { 
+    status: res.status, 
+    statusText: res.statusText,
+    bodyLength: raw.length, 
+    bodyPreview: raw.slice(0, 500) 
+  })
+  if (!res.ok) {
+    console.error('[api] fetchEventsByDateSnapshots error', { status: res.status, statusText: res.statusText, body: raw })
+    throw new Error(res.statusText)
+  }
+  let parsed: unknown = null
+  try {
+    parsed = JSON.parse(raw)
+  } catch (e) {
+    console.error('[api] fetchEventsByDateSnapshots json parse failed', e)
+    throw new Error('Invalid JSON response')
+  }
+  console.log('[api] fetchEventsByDateSnapshots parsed', { 
+    parsedType: typeof parsed,
+    isArray: Array.isArray(parsed), 
+    length: Array.isArray(parsed) ? parsed.length : null,
+    firstItemKeys: Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'object' && parsed[0] !== null ? Object.keys(parsed[0]) : null
+  })
+  if (!Array.isArray(parsed)) {
+    console.warn('[api] fetchEventsByDateSnapshots response is not an array', { type: typeof parsed })
+    return []
+  }
+  return parsed as EventItem[]
 }
 
 /** Debug: per-snapshot rows for a market (no raw_payload). Lazy-load when market selected. */
@@ -269,21 +427,109 @@ export async function fetchMarketSnapshots(
   to?: Date,
   limit = 200
 ): Promise<DebugSnapshotRow[]> {
+  const apiBase = getApiBase()
   const params = new URLSearchParams({ limit: String(limit) })
   if (from) params.set('from_ts', toISO(from))
   if (to) params.set('to_ts', toISO(to))
-  const res = await fetch(
-    `${API_BASE}/debug/markets/${encodeURIComponent(marketId)}/snapshots?${params}`
-  )
-  if (!res.ok) throw new Error(res.statusText)
-  return res.json()
+  const url = `${apiBase}/debug/markets/${encodeURIComponent(marketId)}/snapshots?${params}`
+  console.log('[api] fetchMarketSnapshots request', { 
+    apiBase, 
+    marketId, 
+    from: from?.toISOString(), 
+    to: to?.toISOString(), 
+    limit,
+    url 
+  })
+  const res = await fetch(url)
+  const raw = await res.text()
+  console.log('[api] fetchMarketSnapshots response', { 
+    status: res.status, 
+    statusText: res.statusText,
+    bodyLength: raw.length, 
+    bodyPreview: raw.slice(0, 500) 
+  })
+  if (!res.ok) {
+    console.error('[api] fetchMarketSnapshots error', { status: res.status, statusText: res.statusText, body: raw })
+    throw new Error(res.statusText)
+  }
+  let parsed: unknown = null
+  try {
+    parsed = JSON.parse(raw)
+  } catch (e) {
+    console.error('[api] fetchMarketSnapshots json parse failed', e)
+    throw new Error('Invalid JSON response')
+  }
+  console.log('[api] fetchMarketSnapshots parsed', { 
+    parsedType: typeof parsed,
+    isArray: Array.isArray(parsed), 
+    length: Array.isArray(parsed) ? parsed.length : null,
+    firstItemKeys: Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'object' && parsed[0] !== null ? Object.keys(parsed[0]) : null
+  })
+  if (!Array.isArray(parsed)) {
+    console.warn('[api] fetchMarketSnapshots response is not an array', { type: typeof parsed })
+    return []
+  }
+  return parsed as DebugSnapshotRow[]
 }
 
 /** Debug: raw_payload for one snapshot (on row click). */
 export async function fetchSnapshotRaw(
   snapshotId: number
 ): Promise<{ snapshot_id: number; snapshot_at: string | null; market_id: string; raw_payload: unknown; truncated?: boolean; raw_payload_size_bytes?: number }> {
-  const res = await fetch(`${API_BASE}/debug/snapshots/${snapshotId}/raw`)
+  const res = await fetch(`${getApiBase()}/debug/snapshots/${snapshotId}/raw`)
   if (!res.ok) throw new Error(res.statusText)
   return res.json()
+}
+
+/** Fetch raw ticks for a market within a time range (for audit view). */
+export async function fetchMarketTicks(
+  marketId: string,
+  from: Date,
+  to: Date,
+  limit = 2000
+): Promise<TickRow[]> {
+  const apiBase = getApiBase()
+  const params = new URLSearchParams({
+    from_ts: toISO(from),
+    to_ts: toISO(to),
+    limit: String(limit),
+  })
+  const url = `${apiBase}/markets/${encodeURIComponent(marketId)}/ticks?${params}`
+  console.log('[api] fetchMarketTicks request', { 
+    apiBase, 
+    marketId, 
+    from: from.toISOString(), 
+    to: to.toISOString(), 
+    limit,
+    url 
+  })
+  const res = await fetch(url)
+  const raw = await res.text()
+  console.log('[api] fetchMarketTicks response', { 
+    status: res.status, 
+    statusText: res.statusText,
+    bodyLength: raw.length, 
+    bodyPreview: raw.slice(0, 500) 
+  })
+  if (!res.ok) {
+    console.error('[api] fetchMarketTicks error', { status: res.status, statusText: res.statusText, body: raw })
+    throw new Error(res.statusText)
+  }
+  let parsed: unknown = null
+  try {
+    parsed = JSON.parse(raw)
+  } catch (e) {
+    console.error('[api] fetchMarketTicks json parse failed', e)
+    throw new Error('Invalid JSON response')
+  }
+  console.log('[api] fetchMarketTicks parsed', { 
+    parsedType: typeof parsed,
+    isArray: Array.isArray(parsed), 
+    length: Array.isArray(parsed) ? parsed.length : null,
+  })
+  if (!Array.isArray(parsed)) {
+    console.warn('[api] fetchMarketTicks response is not an array', { type: typeof parsed })
+    return []
+  }
+  return parsed as TickRow[]
 }

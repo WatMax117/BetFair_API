@@ -26,7 +26,13 @@ function getTomorrowUTC(): string {
   return d.toISOString().slice(0, 10)
 }
 
-export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventItem) => void }) {
+export function LeaguesAccordion({ 
+  onSelectEvent, 
+  onDateChange 
+}: { 
+  onSelectEvent: (e: EventItem) => void
+  onDateChange?: (date: string) => void
+}) {
   const [selectedDate, setSelectedDate] = useState<string>(() => getTodayUTC())
   const [events, setEvents] = useState<EventItem[]>([])
   const [loading, setLoading] = useState(true)
@@ -36,10 +42,19 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
+    console.log('[LeaguesAccordion] load called', { selectedDate })
     try {
       const data = await fetchEventsByDateSnapshots(selectedDate)
-      setEvents(Array.isArray(data) ? data : [])
+      console.log('[LeaguesAccordion] data received', { 
+        isArray: Array.isArray(data), 
+        length: Array.isArray(data) ? data.length : null,
+        sample: Array.isArray(data) && data.length > 0 ? data[0] : null
+      })
+      const eventsArray = Array.isArray(data) ? data : []
+      console.log('[LeaguesAccordion] setting events', { count: eventsArray.length })
+      setEvents(eventsArray)
     } catch (e) {
+      console.error('[LeaguesAccordion] load error', e)
       setError(e instanceof Error ? e.message : 'Failed to load events')
       setEvents([])
     } finally {
@@ -50,6 +65,12 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
   useEffect(() => {
     load()
   }, [load])
+
+  useEffect(() => {
+    if (onDateChange) {
+      onDateChange(selectedDate)
+    }
+  }, [selectedDate, onDateChange])
 
   return (
     <Box>
@@ -95,7 +116,15 @@ export function LeaguesAccordion({ onSelectEvent }: { onSelectEvent: (e: EventIt
             events={events}
             sortState={sortState}
             onSortChange={setSortState}
-            onSelectEvent={onSelectEvent}
+            onSelectEvent={(e: EventItem) => {
+              console.log('[LeaguesAccordion] Event selected', { 
+                market_id: e.market_id, 
+                event_name: e.event_name,
+                selectedDate,
+                latest_snapshot_at: e.latest_snapshot_at
+              })
+              onSelectEvent(e)
+            }}
             showCalendarColumns
           />
         </>

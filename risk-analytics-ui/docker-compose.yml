@@ -1,6 +1,6 @@
 # Risk Analytics UI — API + Web (read-only DB).
 # Run from repo root with main stack: docker compose -f docker-compose.yml -f risk-analytics-ui/docker-compose.yml up -d
-# Or run standalone (set POSTGRES_HOST to your postgres host): docker compose -f risk-analytics-ui/docker-compose.yml up -d
+# Or run standalone: ensure netbet_default exists (start main stack first) and set POSTGRES_HOST to your postgres container name.
 
 services:
   risk-analytics-ui-api:
@@ -8,16 +8,19 @@ services:
       context: ./api
       dockerfile: Dockerfile
     container_name: risk-analytics-ui-api
+    env_file:
+      - ../.env
     environment:
-      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_HOST: ${POSTGRES_HOST:-netbet-postgres}
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
       POSTGRES_DB: ${POSTGRES_DB:-netbet}
-      POSTGRES_USER: ${POSTGRES_ANALYTICS_READER_USER:-netbet_analytics_reader}
-      POSTGRES_PASSWORD: ${POSTGRES_ANALYTICS_READER_PASSWORD}
       PGOPTIONS: -c search_path=analytics
     ports:
       - "8000:8000"
     restart: unless-stopped
+    networks:
+      - default
+      - netbet_default
 
   risk-analytics-ui-web:
     build:
@@ -29,3 +32,9 @@ services:
     depends_on:
       - risk-analytics-ui-api
     restart: unless-stopped
+    networks:
+      - default
+
+networks:
+  netbet_default:
+    external: true

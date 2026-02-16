@@ -42,11 +42,13 @@ public class PostgresStreamEventSink implements StreamEventSink {
             "NEXT_GOAL", "NEXT_GOAL"
     );
     private static final int MAX_LEVEL = 8;
-    private static final String LADDER_SQL = "INSERT INTO ladder_levels (market_id, selection_id, side, level, price, size, publish_time, received_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (market_id, selection_id, side, level, publish_time) DO NOTHING";
-    private static final String TRADED_SQL = "INSERT INTO traded_volume (market_id, selection_id, price, size_traded, publish_time, received_time) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (market_id, selection_id, price, publish_time) DO UPDATE SET size_traded = EXCLUDED.size_traded, received_time = EXCLUDED.received_time";
-    private static final String LIFECYCLE_SQL = "INSERT INTO market_lifecycle_events (market_id, status, in_play, publish_time, received_time) VALUES (?, ?, ?, ?, ?)";
-    private static final String LIQUIDITY_SQL = "INSERT INTO market_liquidity_history (market_id, publish_time, total_matched, max_runner_ltp) VALUES (?, ?, ?, ?) ON CONFLICT (market_id, publish_time) DO UPDATE SET total_matched = EXCLUDED.total_matched, max_runner_ltp = EXCLUDED.max_runner_ltp";
-    private static final String UPDATE_MARKET_TOTAL_MATCHED = "UPDATE markets SET total_matched = GREATEST(COALESCE(total_matched, 0), ?) WHERE market_id = ?";
+    // Schema-qualified SQL to ensure writes go to stream_ingest (not public)
+    private static final String LADDER_SQL = "INSERT INTO stream_ingest.ladder_levels (market_id, selection_id, side, level, price, size, publish_time, received_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (market_id, selection_id, side, level, publish_time) DO NOTHING";
+    private static final String TRADED_SQL = "INSERT INTO stream_ingest.traded_volume (market_id, selection_id, price, size_traded, publish_time, received_time) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (market_id, selection_id, price, publish_time) DO UPDATE SET size_traded = EXCLUDED.size_traded, received_time = EXCLUDED.received_time";
+    private static final String LIFECYCLE_SQL = "INSERT INTO stream_ingest.market_lifecycle_events (market_id, status, in_play, publish_time, received_time) VALUES (?, ?, ?, ?, ?)";
+    private static final String LIQUIDITY_SQL = "INSERT INTO stream_ingest.market_liquidity_history (market_id, publish_time, total_matched, max_runner_ltp) VALUES (?, ?, ?, ?) ON CONFLICT (market_id, publish_time) DO UPDATE SET total_matched = EXCLUDED.total_matched, max_runner_ltp = EXCLUDED.max_runner_ltp";
+    // Metadata tables (events, markets, runners) remain in public schema per Flyway V1
+    private static final String UPDATE_MARKET_TOTAL_MATCHED = "UPDATE public.markets SET total_matched = GREATEST(COALESCE(total_matched, 0), ?) WHERE market_id = ?";
 
     private final BlockingQueue<QueueItem> queue = new LinkedBlockingQueue<>(50_000);
     private final MarketCache marketCache;

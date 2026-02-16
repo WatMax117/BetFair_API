@@ -10,6 +10,10 @@ spring:
   flyway:
     enabled: ${FLYWAY_ENABLED:true}
     locations: classpath:db/migration
+    # Baseline existing production schema (do not recreate objects)
+    baseline-on-migrate: ${SPRING_FLYWAY_BASELINE_ON_MIGRATE:false}
+    baseline-version: ${SPRING_FLYWAY_BASELINE_VERSION:1}
+    schemas: ${SPRING_FLYWAY_SCHEMAS:stream_ingest}
 
 betfair:
   token-url: ${BETFAIR_TOKEN_URL:http://auth-service:8080/token}
