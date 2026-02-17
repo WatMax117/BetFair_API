@@ -55,12 +55,13 @@ def stream_event_timeseries(
 
 @stream_router.get("/events/{market_id}/meta")
 def stream_event_meta(market_id: str):
-    """Metadata from public.market_event_metadata (same as REST)."""
+    """Metadata from public.market_event_metadata; includes H/A/D selection IDs and replay support."""
     with cursor() as cur:
         cur.execute(
             """
             SELECT market_id, event_name, event_open_date, competition_name,
-                   home_runner_name, away_runner_name, draw_runner_name
+                   home_runner_name, away_runner_name, draw_runner_name,
+                   home_selection_id, away_selection_id, draw_selection_id
             FROM market_event_metadata
             WHERE market_id = %s
             """,
@@ -69,6 +70,22 @@ def stream_event_meta(market_id: str):
         row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Event not found")
+
+    # Last tick time for replay (max publish_time in ladder_levels for this market)
+    last_tick_time = None
+    with cursor() as cur:
+        cur.execute(
+            """
+            SELECT max(publish_time) AS last_tick_time
+            FROM stream_ingest.ladder_levels
+            WHERE market_id = %s
+            """,
+            (market_id,),
+        )
+        r = cur.fetchone()
+        if r and r.get("last_tick_time"):
+            last_tick_time = r["last_tick_time"].isoformat() if hasattr(r["last_tick_time"], "isoformat") else str(r["last_tick_time"])
+
     return {
         "market_id": row["market_id"],
         "event_name": row["event_name"],
@@ -77,6 +94,133 @@ def stream_event_meta(market_id: str):
         "home_runner_name": row.get("home_runner_name"),
         "away_runner_name": row.get("away_runner_name"),
         "draw_runner_name": row.get("draw_runner_name"),
+        "home_selection_id": row.get("home_selection_id"),
+        "away_selection_id": row.get("away_selection_id"),
+        "draw_selection_id": row.get("draw_selection_id"),
+        "has_raw_stream": False,
+        "has_full_raw_payload": False,
+        "supports_replay_snapshot": True,
+        "last_tick_time": last_tick_time,
+        "retention_policy": "Tick data in stream_ingest.ladder_levels; 15-min aggregates derived at read. See RETENTION_MATRIX.md.",
+    }
+
+
+@stream_router.get("/events/{market_id}/replay_snapshot")
+def stream_event_replay_snapshot(
+    market_id: str,
+    at_ts: Optional[str] = Query(None, description="Point-in-time (ISO 8601 UTC); omit for latest"),
+    mode: Optional[str] = Query(None, description="utc | local (formatting only)"),
+):
+    """
+    Reconstruct a market snapshot from stored stream ticks (ladder_levels).
+    Returns latest available tick snapshot, or snapshot at or before at_ts.
+    No raw payload storage; snapshot is reconstructed from ladder + liquidity.
+    """
+    at_dt = _parse_ts_stream(at_ts, datetime.now(timezone.utc)) if at_ts else None
+    with cursor() as cur:
+        # 1) Resolve snapshot_time: max(publish_time) for market [at or before at_ts]
+        if at_dt is not None:
+            cur.execute(
+                """
+                SELECT publish_time
+                FROM stream_ingest.ladder_levels
+                WHERE market_id = %s AND publish_time <= %s
+                ORDER BY publish_time DESC
+                LIMIT 1
+                """,
+                (market_id, at_dt),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT publish_time
+                FROM stream_ingest.ladder_levels
+                WHERE market_id = %s
+                ORDER BY publish_time DESC
+                LIMIT 1
+                """,
+                (market_id,),
+            )
+        row = cur.fetchone()
+        if not row or not row.get("publish_time"):
+            raise HTTPException(status_code=404, detail="No tick data available for market.")
+        snapshot_time = row["publish_time"]
+
+        # 2) All ladder rows at that snapshot_time
+        cur.execute(
+            """
+            SELECT selection_id, side, level, price, size
+            FROM stream_ingest.ladder_levels
+            WHERE market_id = %s AND publish_time = %s
+            """,
+            (market_id, snapshot_time),
+        )
+        ladder_rows = cur.fetchall()
+
+        # 3) Latest liquidity at or before snapshot_time
+        cur.execute(
+            """
+            SELECT total_matched
+            FROM stream_ingest.market_liquidity_history
+            WHERE market_id = %s AND publish_time <= %s
+            ORDER BY publish_time DESC
+            LIMIT 1
+            """,
+            (market_id, snapshot_time),
+        )
+        liq_row = cur.fetchone()
+        total_matched = float(liq_row["total_matched"]) if liq_row and liq_row.get("total_matched") is not None else None
+
+    # Aggregate per selection: best back (side=B, level=0), best lay (side=L, level=0)
+    by_sel: dict = {}
+    for r in ladder_rows:
+        sid = str(r["selection_id"])
+        if sid not in by_sel:
+            by_sel[sid] = {"best_back_price": None, "best_back_size": None, "best_lay_price": None, "best_lay_size": None}
+        side = (r.get("side") or "").upper()
+        level = int(r["level"]) if r.get("level") is not None else None
+        if level != 0:
+            continue
+        price = float(r["price"]) if r.get("price") is not None else None
+        size = float(r["size"]) if r.get("size") is not None else None
+        if side == "B":
+            by_sel[sid]["best_back_price"] = price
+            by_sel[sid]["best_back_size"] = size
+        elif side == "L":
+            by_sel[sid]["best_lay_price"] = price
+            by_sel[sid]["best_lay_size"] = size
+
+    selections = [
+        {
+            "selection_id": sid,
+            "best_back_price": v["best_back_price"],
+            "best_back_size": v["best_back_size"],
+            "best_lay_price": v["best_lay_price"],
+            "best_lay_size": v["best_lay_size"],
+        }
+        for sid, v in sorted(by_sel.items())
+    ]
+
+    # available_to_back / available_to_lay: sum of level-0 sizes from ladder at this snapshot
+    available_to_back = sum(
+        v["best_back_size"] or 0 for v in by_sel.values()
+    )
+    available_to_lay = sum(
+        v["best_lay_size"] or 0 for v in by_sel.values()
+    )
+
+    snapshot_time_iso = snapshot_time.isoformat() if hasattr(snapshot_time, "isoformat") else str(snapshot_time)
+    return {
+        "market_id": market_id,
+        "snapshot_time": snapshot_time_iso,
+        "is_reconstructed": True,
+        "source": "ladder_levels",
+        "selections": selections,
+        "liquidity": {
+            "total_matched": total_matched,
+            "available_to_back": available_to_back if available_to_back else None,
+            "available_to_lay": available_to_lay if available_to_lay else None,
+        },
     }
 
 

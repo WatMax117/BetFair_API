@@ -28,7 +28,7 @@ import {
   Legend,
   ResponsiveContainer,
 } from 'recharts'
-import { fetchEventMeta, fetchEventTimeseries, fetchEventLatestRaw, fetchMarketTicks } from '../api'
+import { fetchEventMeta, fetchEventTimeseries, fetchEventLatestRaw, fetchReplaySnapshot, fetchMarketTicks, getApiBase } from '../api'
 import type { EventMeta, TimeseriesPoint, TickRow } from '../api'
 
 const TIME_RANGES = [
@@ -37,18 +37,34 @@ const TIME_RANGES = [
   { label: '72h', hours: 72 },
 ] as const
 
-function formatTime(iso: string | null): string {
+const ODDS_EXTREME_THRESHOLD = 1000
+
+/** Format ISO timestamp: UTC or local with timezone label. */
+function formatTime(iso: string | null, useUtc: boolean): string {
   if (!iso) return '—'
   try {
-    return new Date(iso).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
+    const d = new Date(iso)
+    if (useUtc) {
+      return d.toLocaleString('en-GB', { timeZone: 'UTC', dateStyle: 'short', timeStyle: 'short' }) + ' UTC'
+    }
+    return d.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }) + ' (local)'
   } catch {
     return iso
   }
 }
 
-function num(v: number | null): string {
+/** Format number; "—" for null. For risk/impedance always use "—" for null, never 0. */
+function num(v: number | null | undefined): string {
   if (v == null) return '—'
   return Number.isInteger(v) ? String(v) : v.toFixed(2)
+}
+
+/** Odds display: "—" if null or ≤1; "≥1000" if ≥threshold with extreme flag; else numeric. */
+function formatOdds(odds: number | null | undefined, opts?: { extremeThreshold?: number }): { text: string; extreme?: boolean } {
+  const max = opts?.extremeThreshold ?? ODDS_EXTREME_THRESHOLD
+  if (odds == null || odds <= 1.0) return { text: '—' }
+  if (odds >= max) return { text: `≥${max}`, extreme: true }
+  return { text: Number.isInteger(odds) ? String(odds) : odds.toFixed(2) }
 }
 
 function spread(back: number | null, lay: number | null): number | null {
@@ -83,6 +99,10 @@ export function EventDetail({
   const [rawModalOpen, setRawModalOpen] = useState(false)
   const [rawPayload, setRawPayload] = useState<unknown>(null)
   const [rawLoading, setRawLoading] = useState(false)
+  const [isReplayView, setIsReplayView] = useState(false)
+  const [useUtc, setUseUtc] = useState(true)
+  const [apiDebugOpen, setApiDebugOpen] = useState(false)
+  const [lastRequestInfo, setLastRequestInfo] = useState<{ timeseries?: { from_ts: string; to_ts: string }; ticks?: { from_ts: string; to_ts: string } }>({})
 
   // Use selectedDate to determine time window, fallback to rolling 24h if not available
   const { from, to } = useMemo(() => {
@@ -119,15 +139,12 @@ export function EventDetail({
   }, [marketId])
 
   const loadTimeseries = useCallback(() => {
-    console.log('[EventDetail] Loading timeseries', { marketId, from: from.toISOString(), to: to.toISOString() })
+    const from_ts = from.toISOString()
+    const to_ts = to.toISOString()
+    setLastRequestInfo((prev) => ({ ...prev, timeseries: { from_ts, to_ts } }))
     setLoadingTs(true)
     fetchEventTimeseries(marketId, from, to, 15)
       .then((data: TimeseriesPoint[]) => {
-        console.log('[EventDetail] Timeseries received', { 
-          length: data.length, 
-          first: data.length > 0 ? data[0] : null, 
-          last: data.length > 0 ? data[data.length - 1] : null
-        })
         setTimeseries(data)
       })
       .catch((e: unknown) => {
@@ -156,13 +173,10 @@ export function EventDetail({
       bucketStart: bucketStart.toISOString(), 
       bucketEnd: bucketEnd.toISOString() 
     })
+    setLastRequestInfo((prev) => ({ ...prev, ticks: { from_ts: bucketStart.toISOString(), to_ts: bucketEnd.toISOString() } }))
     setLoadingTicks(true)
     fetchMarketTicks(marketId, bucketStart, bucketEnd, 2000)
       .then((data: TickRow[]) => {
-        console.log('[EventDetail] Ticks received', { 
-          length: data.length, 
-          first: data.length > 0 ? data[0] : null
-        })
         setTicks(data)
       })
       .catch((e: unknown) => {
@@ -187,7 +201,11 @@ export function EventDetail({
   }, [timeseries, selectedBucket])
 
   const chartData = timeseries.map((p) => ({
-    time: p.snapshot_at ? new Date(p.snapshot_at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }) : '',
+    time: p.snapshot_at
+      ? (useUtc
+          ? new Date(p.snapshot_at).toLocaleTimeString('en-GB', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' })
+          : new Date(p.snapshot_at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }))
+      : '',
     fullTime: p.snapshot_at,
     home_back: p.home_best_back ?? null,
     away_back: p.away_best_back ?? null,
@@ -208,28 +226,45 @@ export function EventDetail({
   const awaySpread = selectedBucketData ? spread(selectedBucketData.away_best_back, selectedBucketData.away_best_lay) : null
   const drawSpread = selectedBucketData ? spread(selectedBucketData.draw_best_back, selectedBucketData.draw_best_lay) : null
   
-  // Format bucket time for display
   const formatBucketTime = (iso: string | null): string => {
     if (!iso) return '—'
-    try {
-      const d = new Date(iso)
-      return d.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
-    } catch {
-      return iso
-    }
+    return formatTime(iso, useUtc)
   }
+
+  // Selection IDs from backend meta; show banner if missing or duplicated
+  const selectionIdsOk = useMemo(() => {
+    if (!meta) return true
+    const h = meta.home_selection_id
+    const a = meta.away_selection_id
+    const d = meta.draw_selection_id
+    const ids = [h, a, d].filter((x): x is number => x != null)
+    if (ids.length === 0) return false
+    const set = new Set(ids)
+    return set.size === ids.length
+  }, [meta])
 
   const handleCopyMarketId = () => {
     navigator.clipboard.writeText(marketId)
   }
+  const useReplaySnapshot = Boolean(meta && meta.has_full_raw_payload === false && meta.supports_replay_snapshot === true)
+
   const handleViewRaw = () => {
     setRawModalOpen(true)
     setRawLoading(true)
     setRawPayload(null)
-    fetchEventLatestRaw(marketId)
-      .then((r: { raw_payload: unknown }) => setRawPayload(r.raw_payload))
-      .catch(() => setRawPayload(null))
-      .finally(() => setRawLoading(false))
+    if (useReplaySnapshot) {
+      setIsReplayView(true)
+      fetchReplaySnapshot(marketId)
+        .then((r) => setRawPayload(r))
+        .catch(() => setRawPayload(null))
+        .finally(() => setRawLoading(false))
+    } else {
+      setIsReplayView(false)
+      fetchEventLatestRaw(marketId)
+        .then((r: { raw_payload: unknown }) => setRawPayload(r.raw_payload))
+        .catch(() => setRawPayload(null))
+        .finally(() => setRawLoading(false))
+    }
   }
   return (
     <Box>
@@ -241,11 +276,24 @@ export function EventDetail({
         <Typography color="text.secondary">Loading event…</Typography>
       ) : meta ? (
         <>
+          {!selectionIdsOk && (
+            <Paper sx={{ p: 1.5, mb: 2, bgcolor: 'error.light', color: 'error.contrastText' }}>
+              <Typography variant="body2">
+                Selection IDs missing or duplicated (H/A/D). Check backend meta. Risk and ticks may be misaligned.
+              </Typography>
+            </Paper>
+          )}
           <Paper sx={{ p: 2, mb: 2 }}>
             <Typography variant="h6">{meta.event_name || marketId}</Typography>
-            <Typography color="text.secondary">
-              {meta.competition_name} · Start: {formatTime(meta.event_open_date)}
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+              <Typography color="text.secondary">
+                {meta.competition_name} · Start: {formatTime(meta.event_open_date, useUtc)}
+              </Typography>
+              <ToggleButtonGroup value={useUtc ? 'utc' : 'local'} exclusive size="small" onChange={(_, v) => v != null && setUseUtc(v === 'utc')}>
+                <ToggleButton value="utc">UTC</ToggleButton>
+                <ToggleButton value="local">Local</ToggleButton>
+              </ToggleButtonGroup>
+            </Box>
             <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
               market_id: {marketId}
             </Typography>
@@ -254,18 +302,31 @@ export function EventDetail({
                 Copy market_id
               </Button>
               <Button size="small" startIcon={<CodeIcon />} onClick={handleViewRaw}>
-                View latest raw snapshot (JSON)
+                {useReplaySnapshot ? 'View reconstructed snapshot' : 'View latest raw snapshot (JSON)'}
               </Button>
             </Box>
             {selectedBucketData && (
               <Box sx={{ mt: 2, display: 'flex', flexWrap: 'wrap', gap: 3 }}>
                 <Box>
                   <Typography variant="caption" color="text.secondary">Best back</Typography>
-                  <Typography>H {num(selectedBucketData.home_best_back)} / A {num(selectedBucketData.away_best_back)} / D {num(selectedBucketData.draw_best_back)}</Typography>
+                  <Typography>
+                    {(['H', 'A', 'D'] as const).map((label, i) => {
+                      const odds = [selectedBucketData.home_best_back, selectedBucketData.away_best_back, selectedBucketData.draw_best_back][i]
+                      const { text, extreme } = formatOdds(odds)
+                      const content = extreme ? <Typography component="span" sx={{ color: 'warning.main' }}>{text}</Typography> : text
+                      return (
+                        <Tooltip key={label} title={extreme ? 'Extreme odds (stale/unmatched?)' : ''}>
+                          <span>{label} {content}{i < 2 ? ' / ' : ''}</span>
+                        </Tooltip>
+                      )
+                    })}
+                  </Typography>
                 </Box>
                 <Box>
                   <Typography variant="caption" color="text.secondary">Best lay</Typography>
-                  <Typography>H {num(selectedBucketData.home_best_lay)} / A {num(selectedBucketData.away_best_lay)} / D {num(selectedBucketData.draw_best_lay)}</Typography>
+                  <Typography>
+                    H {formatOdds(selectedBucketData.home_best_lay).text} / A {formatOdds(selectedBucketData.away_best_lay).text} / D {formatOdds(selectedBucketData.draw_best_lay).text}
+                  </Typography>
                 </Box>
                 <Tooltip title="Spread = best lay − best back (per selection)">
                   <Box>
@@ -282,16 +343,33 @@ export function EventDetail({
           </Paper>
 
           <Dialog open={rawModalOpen} onClose={() => setRawModalOpen(false)} maxWidth="md" fullWidth>
-            <DialogTitle>Latest raw snapshot — {marketId}</DialogTitle>
+            <DialogTitle>{isReplayView ? 'Reconstructed snapshot' : 'Latest raw snapshot'} — {marketId}</DialogTitle>
             <DialogContent>
               {rawLoading ? (
                 <Typography color="text.secondary">Loading…</Typography>
               ) : rawPayload != null ? (
-                <Box component="pre" sx={{ overflow: 'auto', fontSize: '0.75rem', p: 1, bgcolor: 'grey.100', borderRadius: 1 }}>
-                  {JSON.stringify(rawPayload, null, 2)}
-                </Box>
+                <>
+                  {isReplayView && (
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                      Reconstructed from stored ladder ticks. Full raw payload is not retained.
+                    </Typography>
+                  )}
+                  <Box component="pre" sx={{ overflow: 'auto', fontSize: '0.75rem', p: 1, bgcolor: 'grey.100', borderRadius: 1 }}>
+                    {JSON.stringify(rawPayload, null, 2)}
+                  </Box>
+                </>
               ) : (
-                <Typography color="text.secondary">No raw snapshot available.</Typography>
+                <>
+                  <Typography color="text.secondary">
+                    {isReplayView ? 'No tick data available for market.' : 'No raw snapshot available for this source.'}
+                  </Typography>
+                  {!isReplayView && meta?.has_raw_stream === false && (
+                    <Typography variant="body2" sx={{ mt: 1 }} color="text.secondary">
+                      Stream source does not store full raw payloads; tick data is retained per retention policy. This is not data loss.
+                      {meta.retention_policy && ` ${meta.retention_policy}`}
+                    </Typography>
+                  )}
+                </>
               )}
             </DialogContent>
           </Dialog>
@@ -345,8 +423,10 @@ export function EventDetail({
                     onClick={() => setSelectedBucket(point.snapshot_at || null)}
                     sx={{ minWidth: 'auto' }}
                   >
-                    {point.snapshot_at 
-                      ? new Date(point.snapshot_at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+                    {point.snapshot_at
+                      ? (useUtc
+                          ? new Date(point.snapshot_at).toLocaleTimeString('en-GB', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' })
+                          : new Date(point.snapshot_at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }))
                       : '—'}
                   </Button>
                 ))}
@@ -358,6 +438,9 @@ export function EventDetail({
                   <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>
                     15-Minute Bucket Medians — {formatBucketTime(selectedBucket)}
                   </Typography>
+                  <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
+                    Book Risk and Impedance: computed from medians only.
+                  </Typography>
                   <TableContainer component={Paper} variant="outlined" sx={{ mb: 2 }}>
                     <Table size="small">
                       <TableHead>
@@ -365,6 +448,7 @@ export function EventDetail({
                           <TableCell>Outcome</TableCell>
                           <TableCell align="right">Median Back Odds (15m)</TableCell>
                           <TableCell align="right">Median Back Size (15m)</TableCell>
+                          <TableCell align="right">Coverage (s / #ticks)</TableCell>
                           <TableCell align="right">Book Risk (15m)</TableCell>
                           <TableCell align="right">Impedance Index (15m)</TableCell>
                         </TableRow>
@@ -374,6 +458,7 @@ export function EventDetail({
                           <TableCell><strong>H</strong></TableCell>
                           <TableCell align="right">{num(selectedBucketData.home_back_odds_median ?? null)}</TableCell>
                           <TableCell align="right">{num(selectedBucketData.home_back_size_median ?? null)}</TableCell>
+                          <TableCell align="right">{num(selectedBucketData.home_seconds_covered)}s / {selectedBucketData.home_update_count ?? 0}</TableCell>
                           <TableCell align="right">{num(selectedBucketData.home_book_risk_l3 ?? null)}</TableCell>
                           <TableCell align="right" rowSpan={4}>{num(selectedBucketData.impedance_index_15m ?? null)}</TableCell>
                         </TableRow>
@@ -381,16 +466,18 @@ export function EventDetail({
                           <TableCell><strong>A</strong></TableCell>
                           <TableCell align="right">{num(selectedBucketData.away_back_odds_median ?? null)}</TableCell>
                           <TableCell align="right">{num(selectedBucketData.away_back_size_median ?? null)}</TableCell>
+                          <TableCell align="right">{num(selectedBucketData.away_seconds_covered)}s / {selectedBucketData.away_update_count ?? 0}</TableCell>
                           <TableCell align="right">{num(selectedBucketData.away_book_risk_l3 ?? null)}</TableCell>
                         </TableRow>
                         <TableRow>
                           <TableCell><strong>D</strong></TableCell>
                           <TableCell align="right">{num(selectedBucketData.draw_back_odds_median ?? null)}</TableCell>
                           <TableCell align="right">{num(selectedBucketData.draw_back_size_median ?? null)}</TableCell>
+                          <TableCell align="right">{num(selectedBucketData.draw_seconds_covered)}s / {selectedBucketData.draw_update_count ?? 0}</TableCell>
                           <TableCell align="right">{num(selectedBucketData.draw_book_risk_l3 ?? null)}</TableCell>
                         </TableRow>
                         <TableRow>
-                          <TableCell colSpan={3} variant="footer" sx={{ fontSize: '0.75rem', color: 'text.secondary' }}>
+                          <TableCell colSpan={4} variant="footer" sx={{ fontSize: '0.75rem', color: 'text.secondary' }}>
                             |s−w| H: {num(selectedBucketData.impedance_abs_diff_home ?? null)} A: {num(selectedBucketData.impedance_abs_diff_away ?? null)} D: {num(selectedBucketData.impedance_abs_diff_draw ?? null)}
                           </TableCell>
                         </TableRow>
@@ -406,6 +493,30 @@ export function EventDetail({
                   <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>
                     Tick Audit View — {formatBucketTime(selectedBucket)}
                   </Typography>
+                  {(() => {
+                    const bucketStart = new Date(selectedBucket)
+                    const bucketEnd = new Date(bucketStart.getTime() + 15 * 60 * 1000)
+                    const firstTick = ticks.length > 0 ? ticks[0]?.publish_time : null
+                    const lastTick = ticks.length > 0 ? ticks[ticks.length - 1]?.publish_time : null
+                    const mediansNonNull = selectedBucketData && (
+                      selectedBucketData.home_back_odds_median != null || selectedBucketData.away_back_odds_median != null || selectedBucketData.draw_back_odds_median != null
+                    )
+                    const carryForwardWarning = ticks.length === 0 && mediansNonNull
+                    return (
+                      <>
+                        <Box sx={{ mb: 1, fontSize: '0.8rem', color: 'text.secondary' }}>
+                          bucket_start: {formatTime(selectedBucket, useUtc)} · bucket_end: {formatTime(bucketEnd.toISOString(), useUtc)} · tick_count: {ticks.length}
+                          {firstTick != null && <> · first_tick: {formatTime(firstTick, useUtc)}</>}
+                          {lastTick != null && <> · last_tick: {formatTime(lastTick, useUtc)}</>}
+                        </Box>
+                        {carryForwardWarning && (
+                          <Typography variant="body2" color="warning.main" sx={{ mb: 1 }}>
+                            tick_count is 0 but medians are non-null — bucket is driven by carry-forward baseline.
+                          </Typography>
+                        )}
+                      </>
+                    )
+                  })()}
                   {loadingTicks ? (
                     <Typography color="text.secondary" sx={{ mb: 2 }}>Loading ticks…</Typography>
                   ) : (
@@ -432,12 +543,12 @@ export function EventDetail({
                           ) : (
                             ticks.map((tick, i) => (
                               <TableRow key={i}>
-                                <TableCell>{tick.publish_time ? formatTime(tick.publish_time) : '—'}</TableCell>
-                                <TableCell align="right">{num(tick.home_back_odds ?? null)}</TableCell>
+                                <TableCell>{tick.publish_time ? formatTime(tick.publish_time, useUtc) : '—'}</TableCell>
+                                <TableCell align="right">{formatOdds(tick.home_back_odds).text}</TableCell>
                                 <TableCell align="right">{num(tick.home_back_size ?? null)}</TableCell>
-                                <TableCell align="right">{num(tick.away_back_odds ?? null)}</TableCell>
+                                <TableCell align="right">{formatOdds(tick.away_back_odds).text}</TableCell>
                                 <TableCell align="right">{num(tick.away_back_size ?? null)}</TableCell>
-                                <TableCell align="right">{num(tick.draw_back_odds ?? null)}</TableCell>
+                                <TableCell align="right">{formatOdds(tick.draw_back_odds).text}</TableCell>
                                 <TableCell align="right">{num(tick.draw_back_size ?? null)}</TableCell>
                               </TableRow>
                             ))
@@ -452,12 +563,41 @@ export function EventDetail({
             </>
           )}
 
+          <Box sx={{ mt: 2 }}>
+            <Button size="small" onClick={() => setApiDebugOpen((o) => !o)} sx={{ mb: 0.5 }}>
+              {apiDebugOpen ? 'Hide' : 'Show'} API debug
+            </Button>
+            {apiDebugOpen && (
+              <Paper variant="outlined" sx={{ p: 1.5, mb: 2, fontFamily: 'monospace', fontSize: '0.75rem' }}>
+                <Typography variant="caption" color="text.secondary" display="block">API base</Typography>
+                <Typography component="code">{getApiBase()}</Typography>
+                {lastRequestInfo.timeseries && (
+                  <>
+                    <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Timeseries</Typography>
+                    <Typography component="code">GET {getApiBase()}/events/{marketId}/timeseries?from_ts={lastRequestInfo.timeseries.from_ts}&to_ts={lastRequestInfo.timeseries.to_ts}&interval_minutes=15</Typography>
+                  </>
+                )}
+                {lastRequestInfo.ticks && (
+                  <>
+                    <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Ticks</Typography>
+                    <Typography component="code">GET {getApiBase()}/markets/{marketId}/ticks?from_ts={lastRequestInfo.ticks.from_ts}&to_ts={lastRequestInfo.ticks.to_ts}</Typography>
+                  </>
+                )}
+              </Paper>
+            )}
+          </Box>
+
           <Paper sx={{ p: 2, bgcolor: 'grey.50' }}>
             <Typography variant="caption" color="text.secondary" display="block">Data notes</Typography>
             <Typography variant="body2">
               Bucket interval: 15 minutes UTC. Medians are time-weighted over the bucket duration using carry-forward logic.
               Tick audit view shows all raw ticks (level=0, side='B') within the selected bucket.
             </Typography>
+            {meta?.has_raw_stream === false && (
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                Stream source: full raw snapshots are not stored; tick data is retained per retention policy. “No raw snapshot” here is not data loss.
+              </Typography>
+            )}
             {selectedBucketData && timeseries.length > 0 && (
               <Typography variant="body2" sx={{ mt: 0.5 }}>
                 Selected bucket: {formatBucketTime(selectedBucket)}.

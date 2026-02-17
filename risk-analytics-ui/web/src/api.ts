@@ -1,6 +1,6 @@
 // Base path for API (e.g. /api or /api/stream for stream UI). No trailing slash.
 // When window.__API_BASE__ is set (e.g. by /stream route), that is used so the same app can call stream endpoints.
-function getApiBase(): string {
+export function getApiBase(): string {
   if (typeof window !== 'undefined') {
     const win = window as unknown as { __API_BASE__?: string }
     if (win.__API_BASE__) {
@@ -92,6 +92,13 @@ export type TimeseriesPoint = {
   impedance_abs_diff_home?: number | null
   impedance_abs_diff_away?: number | null
   impedance_abs_diff_draw?: number | null
+  // Data coverage per outcome (seconds with value in bucket, tick update count)
+  home_seconds_covered?: number
+  home_update_count?: number
+  away_seconds_covered?: number
+  away_update_count?: number
+  draw_seconds_covered?: number
+  draw_update_count?: number
 }
 
 export type TickRow = {
@@ -115,6 +122,36 @@ export type EventMeta = {
   home_runner_name: string | null
   away_runner_name: string | null
   draw_runner_name: string | null
+  home_selection_id?: number | null
+  away_selection_id?: number | null
+  draw_selection_id?: number | null
+  has_raw_stream?: boolean
+  has_full_raw_payload?: boolean
+  supports_replay_snapshot?: boolean
+  last_tick_time?: string | null
+  retention_policy?: string | null
+}
+
+/** Replay snapshot: reconstructed from ladder_levels (no raw payload). */
+export type ReplaySnapshotSelection = {
+  selection_id: string
+  best_back_price: number | null
+  best_back_size: number | null
+  best_lay_price: number | null
+  best_lay_size: number | null
+}
+
+export type ReplaySnapshot = {
+  market_id: string
+  snapshot_time: string
+  is_reconstructed: boolean
+  source: string
+  selections: ReplaySnapshotSelection[]
+  liquidity: {
+    total_matched: number | null
+    available_to_back: number | null
+    available_to_lay: number | null
+  }
 }
 
 /** Single row from GET /debug/markets/{market_id}/snapshots (per-snapshot, no raw_payload). */
@@ -303,6 +340,24 @@ export async function fetchEventLatestRaw(
     hasRawPayload: typeof parsed === 'object' && parsed !== null && 'raw_payload' in parsed
   })
   return parsed as { market_id: string; snapshot_at: string | null; raw_payload: unknown }
+}
+
+/** Reconstructed snapshot from stream ticks (replay). Use when supports_replay_snapshot is true. */
+export async function fetchReplaySnapshot(
+  marketId: string,
+  atTs?: string | null
+): Promise<ReplaySnapshot> {
+  const apiBase = getApiBase()
+  const params = new URLSearchParams()
+  if (atTs) params.set('at_ts', atTs)
+  const url = `${apiBase}/events/${encodeURIComponent(marketId)}/replay_snapshot${params.toString() ? `?${params}` : ''}`
+  const res = await fetch(url)
+  const raw = await res.text()
+  if (!res.ok) {
+    if (res.status === 404) throw new Error('No tick data available for market.')
+    throw new Error(res.statusText)
+  }
+  return JSON.parse(raw) as ReplaySnapshot
 }
 
 export async function fetchEventTimeseries(
