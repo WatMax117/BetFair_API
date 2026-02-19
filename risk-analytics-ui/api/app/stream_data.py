@@ -259,6 +259,76 @@ def compute_impedance_index_from_medians(
     }
 
 
+def _compute_median_from_rows(
+    rows: List[Tuple[datetime, Optional[float], Optional[float]]],
+    bucket_start: datetime,
+    effective_end: datetime,
+) -> Tuple[Optional[float], Optional[float], float, int]:
+    """
+    Compute time-weighted median from in-memory rows (publish_time, price, size).
+    Same logic as _compute_bucket_median_back_odds_and_size but no DB.
+    Returns (median_odds, median_size, seconds_covered, update_count).
+    """
+    if not rows:
+        return (None, None, 0.0, 0)
+
+    # Baseline: latest row with publish_time <= bucket_start
+    baseline_row = None
+    for r in sorted(rows, key=lambda x: x[0], reverse=True):
+        if r[0] <= bucket_start:
+            baseline_row = (r[0], r[1], r[2])
+            break
+
+    # Updates: rows with publish_time in (bucket_start, effective_end]
+    update_rows = [(r[0], r[1], r[2]) for r in rows if bucket_start < r[0] <= effective_end]
+    update_rows.sort(key=lambda x: x[0])
+    update_count = len(update_rows)
+
+    baseline_odds = baseline_row[1] if baseline_row else None
+    baseline_size = baseline_row[2] if baseline_row else None
+
+    if not baseline_row and not update_rows:
+        return (None, None, 0.0, 0)
+
+    if baseline_row:
+        segment_start = bucket_start
+        current_odds = baseline_odds
+        current_size = baseline_size
+    else:
+        segment_start = bucket_start
+        current_odds = update_rows[0][1] if update_rows else None
+        current_size = update_rows[0][2] if update_rows else None
+
+    segments: List[Tuple[Optional[float], Optional[float], float]] = []
+
+    for pt, odds, size in update_rows:
+        if pt > segment_start:
+            duration = (pt - segment_start).total_seconds()
+            if duration > 0:
+                segments.append((current_odds, current_size, duration))
+        current_odds = odds
+        current_size = size
+        segment_start = pt
+
+    if segment_start < effective_end:
+        duration = (effective_end - segment_start).total_seconds()
+        if duration > 0:
+            segments.append((current_odds, current_size, duration))
+
+    odds_segments = [(1.0 / o, d) for o, _, d in segments if o is not None and o > 0]
+    size_segments = [(s, d) for _, s, d in segments if s is not None]
+    median_odds = None
+    median_size = None
+    if odds_segments:
+        m = _time_weighted_median(odds_segments)
+        if m is not None and m > 0:
+            median_odds = 1.0 / m
+    if size_segments:
+        median_size = _time_weighted_median(size_segments)
+    seconds_covered = sum(d for _, _, d in segments)
+    return (median_odds, median_size, seconds_covered, update_count)
+
+
 def _time_weighted_median(values_with_weights: List[Tuple[float, float]]) -> Optional[float]:
     """
     Compute time-weighted median from list of (value, weight_seconds) tuples.
@@ -293,17 +363,13 @@ def _compute_bucket_median_back_odds_and_size(
     bucket_start: datetime,
     bucket_end: datetime,
     effective_end: datetime,
-) -> Tuple[Optional[float], Optional[float]]:
+) -> Tuple[Optional[float], Optional[float], float, int]:
     """
     Compute time-weighted median of back_odds and back_size for a selection in a bucket.
     
-    Returns (median_odds, median_size) or (None, None) if no baseline and no updates.
-    
-    Logic:
-    1. Get baseline (latest level=0, side='B' before bucket_start)
-    2. Get all updates (level=0, side='B') in [bucket_start, effective_end]
-    3. Build time segments with durations
-    4. Compute time-weighted median for odds (via 1/odds) and size
+    Returns (median_odds, median_size, seconds_covered, update_count).
+    seconds_covered: total seconds in bucket with a carried/known value.
+    update_count: number of tick updates in [bucket_start, effective_end].
     """
     # Step A: Baseline lookup (latest before bucket_start)
     cur.execute(
@@ -345,9 +411,10 @@ def _compute_bucket_median_back_odds_and_size(
     )
     update_rows = cur.fetchall()
     
-    # If no baseline and no updates, return NULL
+    update_count = len(update_rows)
+    # If no baseline and no updates, return NULL with zero coverage
     if not baseline_row and not update_rows:
-        return (None, None)
+        return (None, None, 0.0, 0)
     
     # Step C: Build time segments
     segments: List[Tuple[Optional[float], Optional[float], float]] = []  # (odds, size, duration_seconds)
@@ -364,8 +431,7 @@ def _compute_bucket_median_back_odds_and_size(
         current_odds = float(update_rows[0]["price"]) if update_rows[0].get("price") is not None else None
         current_size = float(update_rows[0]["size"]) if update_rows[0].get("size") is not None else None
     else:
-        # No baseline and no updates: return NULL
-        return (None, None)
+        return (None, None, 0.0, 0)
     
     # Process updates to build segments
     for i, row in enumerate(update_rows):
@@ -406,7 +472,8 @@ def _compute_bucket_median_back_odds_and_size(
     if size_segments:
         median_size = _time_weighted_median(size_segments)
     
-    return (median_odds, median_size)
+    seconds_covered = sum(d for _, _, d in segments)
+    return (median_odds, median_size, seconds_covered, update_count)
 
 
 def get_stream_markets_with_ladder_for_date(from_dt: datetime, to_dt: datetime) -> List[str]:
@@ -481,25 +548,23 @@ def get_events_by_date_snapshots_stream(date_str: str) -> List[Dict[str, Any]]:
         effective_end = min(bucket_end, now)
         
         with cursor() as cur:
-            # Compute time-weighted medians for back odds and size
             home_odds_median, home_size_median = (None, None)
             away_odds_median, away_size_median = (None, None)
             draw_odds_median, draw_size_median = (None, None)
-            
+            home_seconds_covered = away_seconds_covered = draw_seconds_covered = 0.0
+            home_update_count = away_update_count = draw_update_count = 0
             if m.get("home_selection_id") is not None:
-                home_odds_median, home_size_median = _compute_bucket_median_back_odds_and_size(
+                home_odds_median, home_size_median, home_seconds_covered, home_update_count = _compute_bucket_median_back_odds_and_size(
                     cur, market_id, m["home_selection_id"], bucket_start, bucket_end, effective_end
                 )
             if m.get("away_selection_id") is not None:
-                away_odds_median, away_size_median = _compute_bucket_median_back_odds_and_size(
+                away_odds_median, away_size_median, away_seconds_covered, away_update_count = _compute_bucket_median_back_odds_and_size(
                     cur, market_id, m["away_selection_id"], bucket_start, bucket_end, effective_end
                 )
             if m.get("draw_selection_id") is not None:
-                draw_odds_median, draw_size_median = _compute_bucket_median_back_odds_and_size(
+                draw_odds_median, draw_size_median, draw_seconds_covered, draw_update_count = _compute_bucket_median_back_odds_and_size(
                     cur, market_id, m["draw_selection_id"], bucket_start, bucket_end, effective_end
                 )
-            
-            # Compute Book Risk strictly from medians
             book_risk = compute_book_risk_from_medians(
                 home_odds_median, home_size_median,
                 away_odds_median, away_size_median,
@@ -543,6 +608,12 @@ def get_events_by_date_snapshots_stream(date_str: str) -> List[Dict[str, Any]]:
             "impedance_abs_diff_home": impedance["impedance_abs_diff_home"] if impedance else None,
             "impedance_abs_diff_away": impedance["impedance_abs_diff_away"] if impedance else None,
             "impedance_abs_diff_draw": impedance["impedance_abs_diff_draw"] if impedance else None,
+            "home_seconds_covered": home_seconds_covered,
+            "home_update_count": home_update_count,
+            "away_seconds_covered": away_seconds_covered,
+            "away_update_count": away_update_count,
+            "draw_seconds_covered": draw_seconds_covered,
+            "draw_update_count": draw_update_count,
         })
 
     return result
@@ -606,21 +677,22 @@ def get_event_timeseries_stream(
             if last_pt < stale_cutoff_time:
                 continue
             
-            # Compute time-weighted medians for back odds and size
+            # Compute time-weighted medians for back odds and size (and coverage)
             home_odds_median, home_size_median = (None, None)
             away_odds_median, away_size_median = (None, None)
             draw_odds_median, draw_size_median = (None, None)
-            
+            home_seconds_covered = away_seconds_covered = draw_seconds_covered = 0.0
+            home_update_count = away_update_count = draw_update_count = 0
             if home_sid is not None:
-                home_odds_median, home_size_median = _compute_bucket_median_back_odds_and_size(
+                home_odds_median, home_size_median, home_seconds_covered, home_update_count = _compute_bucket_median_back_odds_and_size(
                     cur, market_id, home_sid, bucket_start, bucket_end, effective_end
                 )
             if away_sid is not None:
-                away_odds_median, away_size_median = _compute_bucket_median_back_odds_and_size(
+                away_odds_median, away_size_median, away_seconds_covered, away_update_count = _compute_bucket_median_back_odds_and_size(
                     cur, market_id, away_sid, bucket_start, bucket_end, effective_end
                 )
             if draw_sid is not None:
-                draw_odds_median, draw_size_median = _compute_bucket_median_back_odds_and_size(
+                draw_odds_median, draw_size_median, draw_seconds_covered, draw_update_count = _compute_bucket_median_back_odds_and_size(
                     cur, market_id, draw_sid, bucket_start, bucket_end, effective_end
                 )
             
@@ -639,30 +711,33 @@ def get_event_timeseries_stream(
             )
             
             # Also get latest state for best_back/best_lay (for compatibility with existing API shape)
-            # Note: These are NOT used for risk computation, only for display compatibility
             runners, home_bb, away_bb, draw_bb, home_bl, away_bl, draw_bl, total_volume = _runners_from_ladder(
                 cur, market_id, bucket_time, home_sid, away_sid, draw_sid,
             )
 
         out.append({
             "snapshot_at": bucket_time.isoformat(),
-            "home_best_back": home_bb,  # Latest state (for compatibility)
+            "home_best_back": home_bb,
             "away_best_back": away_bb,
             "draw_best_back": draw_bb,
             "home_best_lay": home_bl,
             "away_best_lay": away_bl,
             "draw_best_lay": draw_bl,
-            # Time-weighted medians (new bucket parameters)
             "home_back_odds_median": home_odds_median,
             "home_back_size_median": home_size_median,
             "away_back_odds_median": away_odds_median,
             "away_back_size_median": away_size_median,
             "draw_back_odds_median": draw_odds_median,
             "draw_back_size_median": draw_size_median,
+            "home_seconds_covered": home_seconds_covered,
+            "home_update_count": home_update_count,
+            "away_seconds_covered": away_seconds_covered,
+            "away_update_count": away_update_count,
+            "draw_seconds_covered": draw_seconds_covered,
+            "draw_update_count": draw_update_count,
             "home_book_risk_l3": book_risk["home_book_risk_l3"] if book_risk else None,
             "away_book_risk_l3": book_risk["away_book_risk_l3"] if book_risk else None,
             "draw_book_risk_l3": book_risk["draw_book_risk_l3"] if book_risk else None,
-            # Impedance Index (15m) from medians only
             "impedance_index_15m": impedance["impedance_index_15m"] if impedance else None,
             "impedance_abs_diff_home": impedance["impedance_abs_diff_home"] if impedance else None,
             "impedance_abs_diff_away": impedance["impedance_abs_diff_away"] if impedance else None,
@@ -672,6 +747,361 @@ def get_event_timeseries_stream(
             "calculation_version": "stream_15min",
         })
 
+    return out
+
+
+def _tick_count_in_bucket(cur: Any, market_id: str, bucket_start: datetime, bucket_end: datetime) -> int:
+    """Count tick rows (level=0, side=B) in ladder_levels for market in [bucket_start, bucket_end)."""
+    cur.execute(
+        """
+        SELECT COUNT(*) AS cnt
+        FROM stream_ingest.ladder_levels
+        WHERE market_id = %s
+          AND side = 'B'
+          AND level = 0
+          AND publish_time >= %s
+          AND publish_time < %s
+        """,
+        (market_id, bucket_start, bucket_end),
+    )
+    row = cur.fetchone()
+    return int(row["cnt"]) if row and row.get("cnt") is not None else 0
+
+
+def get_event_buckets_stream_bulk(
+    market_id: str,
+    from_dt: datetime,
+    to_dt: datetime,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """
+    Bulk buckets: 3 DB queries total. No per-bucket queries.
+    Returns (buckets_list, db_query_count).
+    Default range: last 180 min (12 buckets).
+
+    Assumptions (see docs/BULK_BUCKETS_EXPLAIN_ANALYZE.md):
+    - Impedance index and Book Risk use only top-of-book back (level 0, side B).
+    - No lay prices or multiple levels required for these metrics.
+    """
+    db_count = 0
+
+    with cursor() as cur:
+        cur.execute(
+            """
+            SELECT m.market_id, m.event_id, m.event_name, m.event_open_date, m.competition_name,
+                   m.home_selection_id, m.away_selection_id, m.draw_selection_id
+            FROM market_event_metadata m
+            WHERE m.market_id = %s
+            """,
+            (market_id,),
+        )
+        meta = cur.fetchone()
+        db_count += 1
+    if not meta:
+        return [], db_count
+
+    home_sid = meta.get("home_selection_id")
+    away_sid = meta.get("away_selection_id")
+    draw_sid = meta.get("draw_selection_id")
+    selection_ids = [s for s in [home_sid, away_sid, draw_sid] if s is not None]
+    if not selection_ids:
+        return [], db_count
+
+    # Extend range 15 min back for baseline of first bucket
+    fetch_from = from_dt - timedelta(minutes=15)
+    fetch_to = to_dt + timedelta(minutes=15)
+    now = datetime.now(timezone.utc)
+
+    # Query 2: ladder_levels - only top-of-book back (level 0, side B) for impedance + book risk
+    with cursor() as cur:
+        cur.execute(
+            """
+            SELECT publish_time, selection_id, price, size
+            FROM stream_ingest.ladder_levels
+            WHERE market_id = %s
+              AND selection_id = ANY(%s)
+              AND side = 'B'
+              AND level = 0
+              AND publish_time >= %s
+              AND publish_time <= %s
+            ORDER BY publish_time ASC
+            """,
+            (market_id, selection_ids, fetch_from, fetch_to),
+        )
+        all_rows = cur.fetchall()
+        db_count += 1
+
+    # Query 3: market_liquidity_history - total_volume (total_matched) per bucket
+    with cursor() as cur:
+        cur.execute(
+            """
+            SELECT publish_time, total_matched
+            FROM stream_ingest.market_liquidity_history
+            WHERE market_id = %s
+              AND publish_time >= %s
+              AND publish_time <= %s
+            ORDER BY publish_time ASC
+            """,
+            (market_id, fetch_from, fetch_to),
+        )
+        liq_rows = cur.fetchall()
+        db_count += 1
+
+    # Build liquidity lookup: for each bucket_end, latest total_matched at or before bucket_end
+    liq_list: List[Tuple[datetime, Optional[float]]] = []
+    for r in liq_rows:
+        pt = r["publish_time"]
+        if pt.tzinfo is None:
+            pt = pt.replace(tzinfo=timezone.utc)
+        tv = float(r["total_matched"]) if r.get("total_matched") is not None else None
+        liq_list.append((pt, tv))
+
+    def total_volume_at(bucket_end_ts: datetime) -> Optional[float]:
+        best = None
+        for pt, tv in liq_list:
+            if pt <= bucket_end_ts:
+                best = tv
+        return best
+
+    # Group by selection_id for efficient lookup
+    by_sel: Dict[int, List[Tuple[datetime, Optional[float], Optional[float]]]] = {}
+    for sid in selection_ids:
+        by_sel[sid] = []
+    for r in all_rows:
+        sid = int(r["selection_id"])
+        if sid not in by_sel:
+            continue
+        pt = r["publish_time"]
+        if pt.tzinfo is None:
+            pt = pt.replace(tzinfo=timezone.utc)
+        price = float(r["price"]) if r.get("price") is not None else None
+        size = float(r["size"]) if r.get("size") is not None else None
+        by_sel[sid].append((pt, price, size))
+
+    bucket_times = _bucket_times_in_range(from_dt, to_dt)
+    out: List[Dict[str, Any]] = []
+
+    for bucket_time in bucket_times:
+        bucket_start = bucket_time
+        bucket_end = bucket_time + timedelta(minutes=15)
+        effective_end = min(bucket_end, now)
+
+        # Tick count: rows with publish_time in [bucket_start, bucket_end) for any selection
+        tick_count = 0
+        for sid in selection_ids:
+            for pt, _, _ in by_sel.get(sid, []):
+                if bucket_start <= pt < bucket_end:
+                    tick_count += 1
+
+        home_odds_median, home_size_median = (None, None)
+        away_odds_median, away_size_median = (None, None)
+        draw_odds_median, draw_size_median = (None, None)
+        home_seconds_covered = away_seconds_covered = draw_seconds_covered = 0.0
+        home_update_count = away_update_count = draw_update_count = 0
+
+        if home_sid is not None:
+            home_odds_median, home_size_median, home_seconds_covered, home_update_count = _compute_median_from_rows(
+                by_sel.get(home_sid, []), bucket_start, effective_end
+            )
+        if away_sid is not None:
+            away_odds_median, away_size_median, away_seconds_covered, away_update_count = _compute_median_from_rows(
+                by_sel.get(away_sid, []), bucket_start, effective_end
+            )
+        if draw_sid is not None:
+            draw_odds_median, draw_size_median, draw_seconds_covered, draw_update_count = _compute_median_from_rows(
+                by_sel.get(draw_sid, []), bucket_start, effective_end
+            )
+
+        book_risk = compute_book_risk_from_medians(
+            home_odds_median, home_size_median,
+            away_odds_median, away_size_median,
+            draw_odds_median, draw_size_median,
+        )
+        impedance = compute_impedance_index_from_medians(
+            home_odds_median, home_size_median,
+            away_odds_median, away_size_median,
+            draw_odds_median, draw_size_median,
+        )
+
+        # Best back at bucket_time: latest row with publish_time <= bucket_time
+        def best_back_at(sid: int) -> Optional[float]:
+            rows = [(pt, price) for pt, price, _ in by_sel.get(sid, [])
+                    if pt <= bucket_time and price is not None]
+            if not rows:
+                return None
+            return max(rows, key=lambda x: x[0])[1]
+
+        home_bb = best_back_at(home_sid) if home_sid else None
+        away_bb = best_back_at(away_sid) if away_sid else None
+        draw_bb = best_back_at(draw_sid) if draw_sid else None
+
+        out.append({
+            "bucket_start": bucket_start.isoformat(),
+            "bucket_end": bucket_end.isoformat(),
+            "tick_count": tick_count,
+            "snapshot_at": bucket_start.isoformat(),
+            "home_best_back": home_bb,
+            "away_best_back": away_bb,
+            "draw_best_back": draw_bb,
+            "home_best_lay": None,
+            "away_best_lay": None,
+            "draw_best_lay": None,
+            "home_back_odds_median": home_odds_median,
+            "home_back_size_median": home_size_median,
+            "away_back_odds_median": away_odds_median,
+            "away_back_size_median": away_size_median,
+            "draw_back_odds_median": draw_odds_median,
+            "draw_back_size_median": draw_size_median,
+            "home_seconds_covered": home_seconds_covered,
+            "home_update_count": home_update_count,
+            "away_seconds_covered": away_seconds_covered,
+            "away_update_count": away_update_count,
+            "draw_seconds_covered": draw_seconds_covered,
+            "draw_update_count": draw_update_count,
+            "home_book_risk_l3": book_risk["home_book_risk_l3"] if book_risk else None,
+            "away_book_risk_l3": book_risk["away_book_risk_l3"] if book_risk else None,
+            "draw_book_risk_l3": book_risk["draw_book_risk_l3"] if book_risk else None,
+            "impedance_index_15m": impedance["impedance_index_15m"] if impedance else None,
+            "impedance_abs_diff_home": impedance["impedance_abs_diff_home"] if impedance else None,
+            "impedance_abs_diff_away": impedance["impedance_abs_diff_away"] if impedance else None,
+            "impedance_abs_diff_draw": impedance["impedance_abs_diff_draw"] if impedance else None,
+            "total_volume": total_volume_at(effective_end),
+            "depth_limit": DEPTH_LIMIT,
+            "calculation_version": "stream_15min_bulk",
+        })
+
+    return out, db_count
+
+
+def get_event_buckets_stream(market_id: str) -> List[Dict[str, Any]]:
+    """
+    All 15-min UTC buckets for a market that have at least one tick.
+    No date/window filter; no staleness filter. Ordered oldest first (ASC) for consistent
+    chart (left→right) and table (top→bottom) chronology; latest = last element.
+    Uses same medians/coverage/risk shape as timeseries for UI compatibility.
+    """
+    with cursor() as cur:
+        cur.execute(
+            """
+            SELECT home_selection_id, away_selection_id, draw_selection_id
+            FROM market_event_metadata
+            WHERE market_id = %s
+            """,
+            (market_id,),
+        )
+        meta = cur.fetchone()
+    if not meta:
+        return []
+
+    with cursor() as cur:
+        cur.execute(
+            """
+            SELECT MIN(publish_time) AS min_pt, MAX(publish_time) AS max_pt
+            FROM stream_ingest.ladder_levels
+            WHERE market_id = %s
+            """,
+            (market_id,),
+        )
+        row = cur.fetchone()
+    if not row or row.get("min_pt") is None or row.get("max_pt") is None:
+        return []
+
+    min_pt = row["min_pt"]
+    max_pt = row["max_pt"]
+    if min_pt.tzinfo is None:
+        min_pt = min_pt.replace(tzinfo=timezone.utc)
+    if max_pt.tzinfo is None:
+        max_pt = max_pt.replace(tzinfo=timezone.utc)
+    from_dt = _bucket_15_utc(min_pt)
+    # Include bucket that contains max_pt
+    to_dt = max_pt + timedelta(minutes=1)
+    now = datetime.now(timezone.utc)
+    bucket_times = _bucket_times_in_range(from_dt, to_dt)
+
+    home_sid = meta.get("home_selection_id")
+    away_sid = meta.get("away_selection_id")
+    draw_sid = meta.get("draw_selection_id")
+    out: List[Dict[str, Any]] = []
+
+    for bucket_time in bucket_times:
+        bucket_start = bucket_time
+        bucket_end = bucket_time + timedelta(minutes=15)
+        effective_end = min(bucket_end, now)
+
+        with cursor() as cur:
+            last_pt = _latest_publish_before(cur, market_id, bucket_time)
+            if last_pt is None:
+                continue
+
+            tick_count = _tick_count_in_bucket(cur, market_id, bucket_start, bucket_end)
+
+            home_odds_median, home_size_median = (None, None)
+            away_odds_median, away_size_median = (None, None)
+            draw_odds_median, draw_size_median = (None, None)
+            home_seconds_covered = away_seconds_covered = draw_seconds_covered = 0.0
+            home_update_count = away_update_count = draw_update_count = 0
+            if home_sid is not None:
+                home_odds_median, home_size_median, home_seconds_covered, home_update_count = _compute_bucket_median_back_odds_and_size(
+                    cur, market_id, home_sid, bucket_start, bucket_end, effective_end
+                )
+            if away_sid is not None:
+                away_odds_median, away_size_median, away_seconds_covered, away_update_count = _compute_bucket_median_back_odds_and_size(
+                    cur, market_id, away_sid, bucket_start, bucket_end, effective_end
+                )
+            if draw_sid is not None:
+                draw_odds_median, draw_size_median, draw_seconds_covered, draw_update_count = _compute_bucket_median_back_odds_and_size(
+                    cur, market_id, draw_sid, bucket_start, bucket_end, effective_end
+                )
+
+            book_risk = compute_book_risk_from_medians(
+                home_odds_median, home_size_median,
+                away_odds_median, away_size_median,
+                draw_odds_median, draw_size_median,
+            )
+            impedance = compute_impedance_index_from_medians(
+                home_odds_median, home_size_median,
+                away_odds_median, away_size_median,
+                draw_odds_median, draw_size_median,
+            )
+            runners, home_bb, away_bb, draw_bb, home_bl, away_bl, draw_bl, total_volume = _runners_from_ladder(
+                cur, market_id, bucket_time, home_sid, away_sid, draw_sid,
+            )
+
+        out.append({
+            "bucket_start": bucket_start.isoformat(),
+            "bucket_end": bucket_end.isoformat(),
+            "tick_count": tick_count,
+            "snapshot_at": bucket_start.isoformat(),
+            "home_best_back": home_bb,
+            "away_best_back": away_bb,
+            "draw_best_back": draw_bb,
+            "home_best_lay": home_bl,
+            "away_best_lay": away_bl,
+            "draw_best_lay": draw_bl,
+            "home_back_odds_median": home_odds_median,
+            "home_back_size_median": home_size_median,
+            "away_back_odds_median": away_odds_median,
+            "away_back_size_median": away_size_median,
+            "draw_back_odds_median": draw_odds_median,
+            "draw_back_size_median": draw_size_median,
+            "home_seconds_covered": home_seconds_covered,
+            "home_update_count": home_update_count,
+            "away_seconds_covered": away_seconds_covered,
+            "away_update_count": away_update_count,
+            "draw_seconds_covered": draw_seconds_covered,
+            "draw_update_count": draw_update_count,
+            "home_book_risk_l3": book_risk["home_book_risk_l3"] if book_risk else None,
+            "away_book_risk_l3": book_risk["away_book_risk_l3"] if book_risk else None,
+            "draw_book_risk_l3": book_risk["draw_book_risk_l3"] if book_risk else None,
+            "impedance_index_15m": impedance["impedance_index_15m"] if impedance else None,
+            "impedance_abs_diff_home": impedance["impedance_abs_diff_home"] if impedance else None,
+            "impedance_abs_diff_away": impedance["impedance_abs_diff_away"] if impedance else None,
+            "impedance_abs_diff_draw": impedance["impedance_abs_diff_draw"] if impedance else None,
+            "total_volume": total_volume,
+            "depth_limit": DEPTH_LIMIT,
+            "calculation_version": "stream_15min",
+        })
+
+    # Return oldest first (ASC): chart left→right, table top→bottom; latest = last
     return out
 
 
@@ -779,40 +1209,31 @@ def get_league_events_stream(
             if last_pt is None or last_pt < stale_cutoff:
                 continue
             
-            # Compute time-weighted medians for back odds and size
-            home_odds_median, home_size_median = (None, None)
-            away_odds_median, away_size_median = (None, None)
-            draw_odds_median, draw_size_median = (None, None)
-            
+            home_seconds_covered = away_seconds_covered = draw_seconds_covered = 0.0
+            home_update_count = away_update_count = draw_update_count = 0
             if m.get("home_selection_id") is not None:
-                home_odds_median, home_size_median = _compute_bucket_median_back_odds_and_size(
+                home_odds_median, home_size_median, home_seconds_covered, home_update_count = _compute_bucket_median_back_odds_and_size(
                     cur, market_id, m["home_selection_id"], bucket_start, bucket_end, effective_end
                 )
             if m.get("away_selection_id") is not None:
-                away_odds_median, away_size_median = _compute_bucket_median_back_odds_and_size(
+                away_odds_median, away_size_median, away_seconds_covered, away_update_count = _compute_bucket_median_back_odds_and_size(
                     cur, market_id, m["away_selection_id"], bucket_start, bucket_end, effective_end
                 )
             if m.get("draw_selection_id") is not None:
-                draw_odds_median, draw_size_median = _compute_bucket_median_back_odds_and_size(
+                draw_odds_median, draw_size_median, draw_seconds_covered, draw_update_count = _compute_bucket_median_back_odds_and_size(
                     cur, market_id, m["draw_selection_id"], bucket_start, bucket_end, effective_end
                 )
             
-            # Compute Book Risk strictly from medians
             book_risk = compute_book_risk_from_medians(
                 home_odds_median, home_size_median,
                 away_odds_median, away_size_median,
                 draw_odds_median, draw_size_median,
             )
-            
-            # Compute Impedance Index (15m) from medians only
             impedance = compute_impedance_index_from_medians(
                 home_odds_median, home_size_median,
                 away_odds_median, away_size_median,
                 draw_odds_median, draw_size_median,
             )
-            
-            # Also get latest state for best_back/best_lay (for compatibility with existing API shape)
-            # Note: These are NOT used for risk computation, only for display compatibility
             runners, home_bb, away_bb, draw_bb, home_bl, away_bl, draw_bl, total_volume = _runners_from_ladder(
                 cur, market_id, latest_bucket,
                 m.get("home_selection_id"), m.get("away_selection_id"), m.get("draw_selection_id"),
@@ -837,6 +1258,12 @@ def get_league_events_stream(
             "impedance_abs_diff_home": impedance["impedance_abs_diff_home"] if impedance else None,
             "impedance_abs_diff_away": impedance["impedance_abs_diff_away"] if impedance else None,
             "impedance_abs_diff_draw": impedance["impedance_abs_diff_draw"] if impedance else None,
+            "home_seconds_covered": home_seconds_covered,
+            "home_update_count": home_update_count,
+            "away_seconds_covered": away_seconds_covered,
+            "away_update_count": away_update_count,
+            "draw_seconds_covered": draw_seconds_covered,
+            "draw_update_count": draw_update_count,
         })
 
     return result

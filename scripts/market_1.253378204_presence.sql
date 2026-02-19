@@ -1,0 +1,2 @@
+select count(*) as ladder_rows, min(publish_time) as min_publish_time, max(publish_time) as max_publish_time, min(received_time) as first_ingest, max(received_time) as last_ingest from stream_ingest.ladder_levels where market_id = '1.253378204';
+select count(*) as liquidity_rows, min(publish_time) as min_publish_time, max(publish_time) as max_publish_time from stream_ingest.market_liquidity_history where market_id = '1.253378204';

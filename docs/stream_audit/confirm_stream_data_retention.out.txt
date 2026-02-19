@@ -1,0 +1,56 @@
+========== 1. SCHEMA / TABLE EXISTENCE ==========
+  schema_name  |        table_name        |    kind     
+---------------+--------------------------+-------------
+ public        | ladder_levels            | partitioned
+ public        | market_book_snapshots    | table
+ public        | market_lifecycle_events  | table
+ public        | market_liquidity_history | table
+ public        | traded_volume            | table
+ stream_ingest | ladder_levels            | partitioned
+ stream_ingest | market_lifecycle_events  | table
+ stream_ingest | market_liquidity_history | table
+ stream_ingest | traded_volume            | table
+(9 rows)
+
+
+========== 2. STREAM INGEST: TICK DATA (ladder_levels) ==========
+ total_ladder_rows | distinct_markets |      min_publish_time      |      max_publish_time      |     min_received_time      |     max_received_time      
+-------------------+------------------+----------------------------+----------------------------+----------------------------+----------------------------
+           1234161 |              197 | 2026-02-05 12:07:54.024+00 | 2026-02-17 06:40:43.263+00 | 2026-02-05 12:07:54.139+00 | 2026-02-17 06:40:43.273+00
+(1 row)
+
+
+========== 3. STREAM INGEST: LIQUIDITY (market_liquidity_history) ==========
+ total_liquidity_rows | distinct_markets |      min_publish_time      |      max_publish_time      
+----------------------+------------------+----------------------------+----------------------------
+                29544 |              193 | 2026-02-05 12:07:54.024+00 | 2026-02-17 06:40:43.263+00
+(1 row)
+
+
+========== 4. COMPLETED EVENTS: DO WE HAVE TICKS? ==========
+ completed_events_in_sample | with_at_least_one_tick | with_zero_ticks |  min_event_open_date   |  max_event_open_date   
+----------------------------+------------------------+-----------------+------------------------+------------------------
+                        500 |                     24 |             476 | 2026-02-06 11:00:00+00 | 2026-02-15 20:30:00+00
+(1 row)
+
+
+========== 5. RAW SNAPSHOTS (REST only; stream has NONE) ==========
+ rest_snapshots_table_exists 
+-----------------------------
+ t
+(1 row)
+
+psql:<stdin>:64: NOTICE:  REST snapshot count and time range: run SELECT count(*), min(snapshot_at), max(snapshot_at) FROM public.market_book_snapshots;
+DO
+
+========== 6. PARTITIONS (if ladder_levels is partitioned) ==========
+[36 rows - stream_ingest + public ladder_levels partitions listed]
+
+========== 7. PROVENANCE COLUMNS (ingest_source / client_version) ==========
+ table_schema  |        table_name        |  column_name  |        data_type         
+---------------+--------------------------+---------------+--------------------------
+ stream_ingest | ladder_levels            | publish_time  | timestamp with time zone
+ stream_ingest | ladder_levels            | received_time | timestamp with time zone
+ stream_ingest | market_liquidity_history | publish_time  | timestamp with time zone
+(3 rows)
+[BEFORE Step 2: ingest_source/client_version not present. After Step 2 they exist.]

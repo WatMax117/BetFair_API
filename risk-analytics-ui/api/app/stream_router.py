@@ -2,15 +2,20 @@
 Stream UI API: same shapes as REST but from stream_ingest with 15-min UTC buckets.
 Mount at prefix /stream. Staleness: STALE_MINUTES in stream_data.
 """
+import logging
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from fastapi import APIRouter, Query, HTTPException
 
 from app.db import cursor
+
+logger = logging.getLogger(__name__)
 from app.stream_data import (
     STALE_MINUTES,
     get_events_by_date_snapshots_stream,
     get_event_timeseries_stream,
+    get_event_buckets_stream_bulk,
 )
 
 
@@ -33,6 +38,41 @@ def stream_events_by_date_snapshots(
     """Snapshot-driven calendar from stream_ingest; 15-min UTC buckets; staleness > {} min excludes market.""".format(STALE_MINUTES)
     events = get_events_by_date_snapshots_stream(date)
     return events
+
+
+# Default bucket window: last 180 minutes (12 buckets)
+BUCKETS_DEFAULT_WINDOW_MINUTES = 180
+
+
+@stream_router.get("/events/{market_id}/buckets")
+def stream_event_buckets(
+    market_id: str,
+    from_ts: Optional[str] = Query(None, description="Start time (ISO 8601 UTC). Default: now - 180 min"),
+    to_ts: Optional[str] = Query(None, description="End time (ISO 8601 UTC). Default: now"),
+):
+    """
+    Bulk buckets: 3 DB queries total (metadata, ladder, liquidity). No per-bucket queries.
+    Default: last 180 min (12 buckets). Same response shape as before.
+    """
+    t_start = time.perf_counter()
+    now = datetime.now(timezone.utc)
+    to_dt = _parse_ts_stream(to_ts, now)
+    from_dt = _parse_ts_stream(from_ts, now - timedelta(minutes=BUCKETS_DEFAULT_WINDOW_MINUTES))
+    if from_dt > to_dt:
+        from_dt = to_dt - timedelta(minutes=BUCKETS_DEFAULT_WINDOW_MINUTES)
+    buckets, db_count = get_event_buckets_stream_bulk(market_id, from_dt, to_dt)
+    t_end = time.perf_counter()
+    total_ms = (t_end - t_start) * 1000
+    try:
+        import json
+        payload_bytes = len(json.dumps(buckets).encode("utf-8"))
+    except Exception:
+        payload_bytes = 0
+    logger.info(
+        "buckets_endpoint market_id=%s bucket_count=%d db_query_count=%d total_ms=%.1f payload_bytes=%d",
+        market_id, len(buckets), db_count, total_ms, payload_bytes,
+    )
+    return buckets
 
 
 @stream_router.get("/events/{market_id}/timeseries")
@@ -292,6 +332,7 @@ def stream_market_ticks(
     Returns all level=0, side='B' ticks ordered by publish_time ascending.
     Used for audit view of ticks within a 15-minute bucket.
     """
+    t_start = time.perf_counter()
     from_dt = _parse_ts_stream(from_ts, datetime.now(timezone.utc) - timedelta(hours=1))
     to_dt = _parse_ts_stream(to_ts, datetime.now(timezone.utc))
     
@@ -384,5 +425,16 @@ def stream_market_ticks(
             tick["draw_back_size"] = None
         
         ticks.append(tick)
-    
+
+    t_end = time.perf_counter()
+    total_ms = (t_end - t_start) * 1000
+    try:
+        import json
+        payload_bytes = len(json.dumps(ticks).encode("utf-8"))
+    except Exception:
+        payload_bytes = 0
+    logger.info(
+        "ticks_endpoint market_id=%s rows=%d total_ms=%.1f payload_bytes=%d",
+        market_id, len(ticks), total_ms, payload_bytes,
+    )
     return ticks

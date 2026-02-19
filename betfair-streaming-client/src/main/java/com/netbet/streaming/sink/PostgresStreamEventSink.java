@@ -30,23 +30,23 @@ import java.util.concurrent.atomic.AtomicLong;
 public class PostgresStreamEventSink implements StreamEventSink {
 
     private static final Logger log = LoggerFactory.getLogger(PostgresStreamEventSink.class);
+    /** Full-Time only; no Half-Time. */
     private static final Set<String> ALLOWED_MARKET_TYPES = Set.of(
-            "MATCH_ODDS_FT", "OVER_UNDER_25_FT", "HALF_TIME_RESULT", "OVER_UNDER_05_HT", "NEXT_GOAL"
+            "MATCH_ODDS_FT", "OVER_UNDER_25_FT", "NEXT_GOAL"
     );
     private static final Map<String, String> STREAM_TO_DB_MARKET_TYPE = Map.of(
+            "MATCH_ODDS_FT", "MATCH_ODDS_FT",
+            "OVER_UNDER_25_FT", "OVER_UNDER_25_FT",
+            "NEXT_GOAL", "NEXT_GOAL",
             "MATCH_ODDS", "MATCH_ODDS_FT",
-            "OVER_UNDER_25", "OVER_UNDER_25_FT",
-            "HALF_TIME", "HALF_TIME_RESULT",
-            "OVER_UNDER_05", "OVER_UNDER_05_HT",
-            "OVER_UNDER_05_HT", "OVER_UNDER_05_HT",
-            "NEXT_GOAL", "NEXT_GOAL"
+            "OVER_UNDER_25", "OVER_UNDER_25_FT"
     );
     private static final int MAX_LEVEL = 8;
     // Schema-qualified SQL to ensure writes go to stream_ingest (not public)
-    private static final String LADDER_SQL = "INSERT INTO stream_ingest.ladder_levels (market_id, selection_id, side, level, price, size, publish_time, received_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (market_id, selection_id, side, level, publish_time) DO NOTHING";
+    private static final String LADDER_SQL = "INSERT INTO stream_ingest.ladder_levels (market_id, selection_id, side, level, price, size, publish_time, received_time, ingest_source, client_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (market_id, selection_id, side, level, publish_time) DO NOTHING";
     private static final String TRADED_SQL = "INSERT INTO stream_ingest.traded_volume (market_id, selection_id, price, size_traded, publish_time, received_time) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (market_id, selection_id, price, publish_time) DO UPDATE SET size_traded = EXCLUDED.size_traded, received_time = EXCLUDED.received_time";
     private static final String LIFECYCLE_SQL = "INSERT INTO stream_ingest.market_lifecycle_events (market_id, status, in_play, publish_time, received_time) VALUES (?, ?, ?, ?, ?)";
-    private static final String LIQUIDITY_SQL = "INSERT INTO stream_ingest.market_liquidity_history (market_id, publish_time, total_matched, max_runner_ltp) VALUES (?, ?, ?, ?) ON CONFLICT (market_id, publish_time) DO UPDATE SET total_matched = EXCLUDED.total_matched, max_runner_ltp = EXCLUDED.max_runner_ltp";
+    private static final String LIQUIDITY_SQL = "INSERT INTO stream_ingest.market_liquidity_history (market_id, publish_time, total_matched, max_runner_ltp, ingest_source, client_version) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (market_id, publish_time) DO UPDATE SET total_matched = EXCLUDED.total_matched, max_runner_ltp = EXCLUDED.max_runner_ltp, ingest_source = EXCLUDED.ingest_source, client_version = EXCLUDED.client_version";
     // Metadata tables (events, markets, runners) remain in public schema per Flyway V1
     private static final String UPDATE_MARKET_TOTAL_MATCHED = "UPDATE public.markets SET total_matched = GREATEST(COALESCE(total_matched, 0), ?) WHERE market_id = ?";
 
@@ -63,18 +63,25 @@ public class PostgresStreamEventSink implements StreamEventSink {
     private volatile long lastFlushDurationMs = 0;
     private volatile long lastErrorTimestamp = 0;
 
+    private final String ingestSource;
+    private final String clientVersion;
+
     public PostgresStreamEventSink(MarketCache marketCache,
                                    JdbcTemplate jdbc,
                                    @Value("${betfair.postgres-sink.flush-interval-ms:500}") long flushIntervalMs,
-                                   @Value("${betfair.postgres-sink.batch-size:200}") int batchSize) {
+                                   @Value("${betfair.postgres-sink.batch-size:200}") int batchSize,
+                                   @Value("${betfair.postgres-sink.ingest-source:stream_api}") String ingestSource,
+                                   @Value("${betfair.postgres-sink.client-version:1.0}") String clientVersion) {
         this.marketCache = marketCache;
         this.jdbc = jdbc;
         this.flushIntervalMs = flushIntervalMs > 0 ? flushIntervalMs : 500;
         this.batchSize = batchSize > 0 ? Math.min(2000, batchSize) : 200;
+        this.ingestSource = ingestSource != null && !ingestSource.isBlank() ? ingestSource : "stream_api";
+        this.clientVersion = clientVersion != null && !clientVersion.isBlank() ? clientVersion : "1.0";
         this.worker = new Thread(this::runWorker, "postgres-sink-worker");
         this.worker.setDaemon(false);
         this.worker.start();
-        log.info("PostgresStreamEventSink started (flushIntervalMs={}, batchSize={})", this.flushIntervalMs, this.batchSize);
+        log.info("PostgresStreamEventSink started (flushIntervalMs={}, batchSize={}, ingestSource={}, clientVersion={})", this.flushIntervalMs, this.batchSize, this.ingestSource, this.clientVersion);
     }
 
     /** Telemetry: total rows inserted (ladder + traded + lifecycle). */
@@ -225,7 +232,9 @@ public class PostgresStreamEventSink implements StreamEventSink {
                 s.marketId(),
                 publishTs,
                 totalMatched,
-                lastPriceTraded != null ? lastPriceTraded : (Double) null
+                lastPriceTraded != null ? lastPriceTraded : (Double) null,
+                ingestSource,
+                clientVersion
         });
 
         for (MarketCache.CachedRunner runner : market.getRunners().values()) {
@@ -233,13 +242,13 @@ public class PostgresStreamEventSink implements StreamEventSink {
             int level = 0;
             for (Map.Entry<Double, Double> e : runner.getBackLadder(levels)) {
                 if (level >= MAX_LEVEL) break;
-                ladderRows.add(new Object[]{s.marketId(), selectionId, "B", level, e.getKey(), e.getValue(), publishTs, receivedTs});
+                ladderRows.add(new Object[]{s.marketId(), selectionId, "B", level, e.getKey(), e.getValue(), publishTs, receivedTs, ingestSource, clientVersion});
                 level++;
             }
             level = 0;
             for (Map.Entry<Double, Double> e : runner.getLayLadder(levels)) {
                 if (level >= MAX_LEVEL) break;
-                ladderRows.add(new Object[]{s.marketId(), selectionId, "L", level, e.getKey(), e.getValue(), publishTs, receivedTs});
+                ladderRows.add(new Object[]{s.marketId(), selectionId, "L", level, e.getKey(), e.getValue(), publishTs, receivedTs, ingestSource, clientVersion});
                 level++;
             }
             for (Map.Entry<Double, Double> e : runner.getTradedVolume().entrySet()) {

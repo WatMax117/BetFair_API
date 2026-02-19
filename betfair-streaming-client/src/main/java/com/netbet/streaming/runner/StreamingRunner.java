@@ -4,6 +4,7 @@ import com.netbet.streaming.cache.MarketCache;
 import com.netbet.streaming.resilience.ReconnectPolicy;
 import com.netbet.streaming.session.SessionProvider;
 import com.netbet.streaming.stream.StreamingClient;
+import com.netbet.streaming.subscription.ActiveMarketsFromDb;
 import com.netbet.streaming.subscription.PriorityMarketResolver;
 import com.netbet.streaming.subscription.SubscriptionManager;
 import org.slf4j.Logger;
@@ -12,6 +13,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -32,23 +34,29 @@ public class StreamingRunner implements CommandLineRunner {
     private final MarketCache marketCache;
     private final SubscriptionManager subscriptionManager;
     private final PriorityMarketResolver priorityMarketResolver;
+    private final ActiveMarketsFromDb activeMarketsFromDb;
     private final int streamDurationMinutes;
     private final boolean reconnectEnabled;
+    private final boolean subscribeFromDb;
 
     public StreamingRunner(SessionProvider sessionProvider,
                            StreamingClient streamingClient,
                            MarketCache marketCache,
                            SubscriptionManager subscriptionManager,
                            PriorityMarketResolver priorityMarketResolver,
+                           ActiveMarketsFromDb activeMarketsFromDb,
                            @Value("${betfair.stream-duration-minutes:0}") int streamDurationMinutes,
-                           @Value("${betfair.reconnect-enabled:true}") boolean reconnectEnabled) {
+                           @Value("${betfair.reconnect-enabled:true}") boolean reconnectEnabled,
+                           @Value("${betfair.subscribe-from-db:true}") boolean subscribeFromDb) {
         this.sessionProvider = sessionProvider;
         this.streamingClient = streamingClient;
         this.marketCache = marketCache;
         this.subscriptionManager = subscriptionManager;
         this.priorityMarketResolver = priorityMarketResolver;
+        this.activeMarketsFromDb = activeMarketsFromDb;
         this.streamDurationMinutes = streamDurationMinutes > 0 ? streamDurationMinutes : 0;
         this.reconnectEnabled = reconnectEnabled;
+        this.subscribeFromDb = subscribeFromDb;
     }
 
     @Override
@@ -74,10 +82,14 @@ public class StreamingRunner implements CommandLineRunner {
                     marketCache.clearAll(); // Every full TCP/TLS reconnection: Initial Image is source of truth
                 }
                 String token = sessionProvider.getValidSession();
-                var priorityIds = priorityMarketResolver.resolvePriorityMarketIds(token);
-                if (!priorityIds.isEmpty()) {
-                    subscriptionManager.setPriorityMarketIds(priorityIds);
-                    log.info("Subscribing to {} markets (40 events x 5 market types)", priorityIds.size());
+                List<String> marketIds = subscribeFromDb ? activeMarketsFromDb.loadActiveMarketIds() : List.of();
+                if (marketIds.isEmpty()) {
+                    marketIds = priorityMarketResolver.resolvePriorityMarketIds(token);
+                }
+                if (!marketIds.isEmpty()) {
+                    var batches = ActiveMarketsFromDb.batch(marketIds, ActiveMarketsFromDb.MAX_MARKET_IDS_PER_SUBSCRIPTION);
+                    subscriptionManager.setBatchedMarketIds(batches);
+                    log.info("Subscribing to {} markets ({} batches, FT only)", marketIds.size(), batches.size());
                 }
                 streamingClient.run(token);
             } catch (SessionProvider.SessionException e) {

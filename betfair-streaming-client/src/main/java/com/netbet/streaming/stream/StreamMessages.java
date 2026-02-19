@@ -25,8 +25,7 @@ public final class StreamMessages {
     }
 
     /**
-     * Market subscription: MATCH_ODDS, CORRECT_SCORE, TOTAL_GOALS, HALF_TIME,
-     * HALFTIME_SCORE, OVER_UNDER_05_HT, OVER_UNDER_15_HT, NEXT_GOAL.
+     * Market subscription: MATCH_ODDS_FT, OVER_UNDER_25_FT, OVER_UNDER_05_HT, MATCH_ODDS_HT, NEXT_GOAL.
      * ladderLevels: 10, fields: EX_ALL_OFFERS, EX_TRADED_VOL, EX_TRADED.
      *
      * @param marketIds optional; if non-empty, subscribe to these specific market IDs
@@ -48,8 +47,7 @@ public final class StreamMessages {
             eventTypeIds.add("1");
             marketFilter.set("eventTypeIds", eventTypeIds);
             ArrayNode marketTypeCodes = MAPPER.createArrayNode();
-            marketTypeCodes.add("MATCH_ODDS").add("CORRECT_SCORE").add("TOTAL_GOALS").add("HALF_TIME")
-                    .add("HALFTIME_SCORE").add("OVER_UNDER_05_HT").add("OVER_UNDER_15_HT").add("NEXT_GOAL");
+            marketTypeCodes.add("MATCH_ODDS_FT").add("OVER_UNDER_25_FT").add("OVER_UNDER_05_HT").add("MATCH_ODDS_HT").add("NEXT_GOAL");
             marketFilter.set("marketTypeCodes", marketTypeCodes);
         }
         root.set("marketFilter", marketFilter);

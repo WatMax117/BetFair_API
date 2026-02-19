@@ -5,16 +5,16 @@
 services:
   risk-analytics-ui-api:
     build:
-      context: ./api
+      context: ./risk-analytics-ui/api
       dockerfile: Dockerfile
     container_name: risk-analytics-ui-api
     env_file:
-      - ../.env
+      - .env
     environment:
       POSTGRES_HOST: ${POSTGRES_HOST:-netbet-postgres}
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
       POSTGRES_DB: ${POSTGRES_DB:-netbet}
-      PGOPTIONS: -c search_path=analytics
+      PGOPTIONS: -c search_path=analytics,public
     ports:
       - "8000:8000"
     restart: unless-stopped
@@ -24,7 +24,7 @@ services:
 
   risk-analytics-ui-web:
     build:
-      context: ./web
+      context: ./risk-analytics-ui/web
       dockerfile: Dockerfile
     container_name: risk-analytics-ui-web
     ports:

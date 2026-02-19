@@ -19,23 +19,21 @@ import java.util.Set;
 public class PostgresMetadataStore {
 
     private static final Logger log = LoggerFactory.getLogger(PostgresMetadataStore.class);
+    /** Full-Time only; no Half-Time. */
     private static final Set<String> ALLOWED_MARKET_TYPES = Set.of(
-            "MATCH_ODDS_FT", "OVER_UNDER_25_FT", "HALF_TIME_RESULT", "OVER_UNDER_05_HT", "NEXT_GOAL"
+            "MATCH_ODDS_FT", "OVER_UNDER_25_FT", "NEXT_GOAL"
     );
     private static final java.util.Map<String, String> CATALOGUE_TO_DB_MARKET_TYPE = java.util.Map.of(
+            "MATCH_ODDS_FT", "MATCH_ODDS_FT",
+            "OVER_UNDER_25_FT", "OVER_UNDER_25_FT",
+            "NEXT_GOAL", "NEXT_GOAL",
             "MATCH_ODDS", "MATCH_ODDS_FT",
-            "OVER_UNDER_25", "OVER_UNDER_25_FT",
-            "HALF_TIME", "HALF_TIME_RESULT",
-            "OVER_UNDER_05", "OVER_UNDER_05_HT",
-            "OVER_UNDER_05_HT", "OVER_UNDER_05_HT",
-            "NEXT_GOAL", "NEXT_GOAL"
+            "OVER_UNDER_25", "OVER_UNDER_25_FT"
     );
-    /** Segment mapping for analytical layer (strict, non-redundant). */
+    /** Segment mapping for analytical layer (FT only). */
     private static final java.util.Map<String, String> MARKET_TYPE_TO_SEGMENT = java.util.Map.of(
             "MATCH_ODDS_FT", "1X2_FT",
             "OVER_UNDER_25_FT", "OU_FT",
-            "OVER_UNDER_05_HT", "OU_HT",
-            "HALF_TIME_RESULT", "HT_LOGIC",
             "NEXT_GOAL", "NEXT_GOAL"
     );
 

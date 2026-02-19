@@ -1,0 +1,22 @@
+========== STREAM API INGESTION STATS (ingest_source = stream_api) ==========
+    dataset    | total_records_written | distinct_events_markets | min_event_time_publish | max_event_time_publish | min_ingest_time | max_ingest_time 
+---------------+-----------------------+-------------------------+------------------------+------------------------+-----------------+-----------------
+ ladder_levels |                     0 |                       0 |                        |                        |                 | 
+(1 row)
+
+            dataset             | total_records_written | distinct_markets |      min_publish_time      |      max_publish_time      |     min_received_time      |     max_received_time      
+--------------------------------+-----------------------+------------------+----------------------------+----------------------------+----------------------------+----------------------------
+ ladder_levels (all, no filter) |               1234975 |              197 | 2026-02-05 12:07:54.024+00 | 2026-02-17 06:43:43.263+00 | 2026-02-05 12:07:54.139+00 | 2026-02-17 06:43:43.274+00
+(1 row)
+
+
+========== LIQUIDITY (stream_api only) ==========
+         dataset          | total_records_written | distinct_markets | min_publish_time | max_publish_time 
+--------------------------+-----------------------+------------------+------------------+------------------
+ market_liquidity_history |                     0 |                0 |                  | 
+(1 row)
+
+            dataset             | total_records | distinct_markets |           min_pt           |           max_pt           
+--------------------------------+---------------+------------------+----------------------------+----------------------------
+ market_liquidity_history (all) |         29562 |              193 | 2026-02-05 12:07:54.024+00 | 2026-02-17 06:43:43.263+00
+(1 row)

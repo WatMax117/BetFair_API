@@ -81,7 +81,9 @@ public class StreamingClient {
             writer = new PrintWriter(out, true, StandardCharsets.UTF_8);
 
             send(StreamMessages.authentication(1, sessionToken, appKey));
-            send(subscriptionManager.getInitialSubscriptionPayload());
+            for (String payload : subscriptionManager.getInitialSubscriptionPayloads()) {
+                send(payload);
+            }
 
             String line;
             while (running.get() && (line = readLineWithLimit(reader)) != null) {
@@ -96,12 +98,14 @@ public class StreamingClient {
     }
 
     /**
-     * On reconnection: send resubscribe payload (same filters, optional initialClk/clk).
+     * On reconnection: send resubscribe payload(s) (same filters, optional initialClk/clk).
      * Call only when already connected and writer is set (e.g. from a reconnection flow that reuses or re-establishes connection).
      */
     public void sendResubscribe() {
         if (writer != null && running.get()) {
-            send(subscriptionManager.getResubscribePayload());
+            for (String payload : subscriptionManager.getResubscribePayloads()) {
+                send(payload);
+            }
         }
     }
 

@@ -6,7 +6,7 @@ SELECT COUNT(*) AS ladder_levels_above_7
 FROM ladder_levels
 WHERE level > 7;
 
--- 2) Market Type Guard: only the 5 allowed market types. Result should list exactly: MATCH_ODDS_FT, OVER_UNDER_25_FT, HALF_TIME_RESULT, OVER_UNDER_05_HT, NEXT_GOAL
+-- 2) Market Type Guard: only the 5 allowed market types. Result should list exactly: MATCH_ODDS_FT, OVER_UNDER_25_FT, OVER_UNDER_05_HT, MATCH_ODDS_HT, NEXT_GOAL
 SELECT DISTINCT market_type
 FROM markets
 ORDER BY market_type;

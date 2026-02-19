@@ -28,14 +28,8 @@ import {
   Legend,
   ResponsiveContainer,
 } from 'recharts'
-import { fetchEventMeta, fetchEventTimeseries, fetchEventLatestRaw, fetchReplaySnapshot, fetchMarketTicks, getApiBase } from '../api'
-import type { EventMeta, TimeseriesPoint, TickRow } from '../api'
-
-const TIME_RANGES = [
-  { label: '6h', hours: 6 },
-  { label: '24h', hours: 24 },
-  { label: '72h', hours: 72 },
-] as const
+import { fetchEventMeta, fetchEventBuckets, fetchEventLatestRaw, fetchReplaySnapshot, fetchMarketTicks, getApiBase } from '../api'
+import type { EventMeta, BucketItem, TickRow } from '../api'
 
 const ODDS_EXTREME_THRESHOLD = 1000
 
@@ -78,7 +72,7 @@ export function EventDetail({
   eventName: _eventName,
   competitionName: _competitionName,
   eventOpenDate: _eventOpenDate,
-  selectedDate,
+  selectedDate: _selectedDate,
   onBack,
 }: {
   marketId: string
@@ -89,12 +83,11 @@ export function EventDetail({
   onBack: () => void
 }) {
   const [meta, setMeta] = useState<EventMeta | null>(null)
-  const [timeseries, setTimeseries] = useState<TimeseriesPoint[]>([])
+  const [buckets, setBuckets] = useState<BucketItem[]>([])
   const [ticks, setTicks] = useState<TickRow[]>([])
   const [loadingMeta, setLoadingMeta] = useState(true)
-  const [loadingTs, setLoadingTs] = useState(true)
+  const [loadingBuckets, setLoadingBuckets] = useState(true)
   const [loadingTicks, setLoadingTicks] = useState(false)
-  const [timeRangeHours, setTimeRangeHours] = useState(24)
   const [selectedBucket, setSelectedBucket] = useState<string | null>(null)
   const [rawModalOpen, setRawModalOpen] = useState(false)
   const [rawPayload, setRawPayload] = useState<unknown>(null)
@@ -102,26 +95,8 @@ export function EventDetail({
   const [isReplayView, setIsReplayView] = useState(false)
   const [useUtc, setUseUtc] = useState(true)
   const [apiDebugOpen, setApiDebugOpen] = useState(false)
-  const [lastRequestInfo, setLastRequestInfo] = useState<{ timeseries?: { from_ts: string; to_ts: string }; ticks?: { from_ts: string; to_ts: string } }>({})
-
-  // Use selectedDate to determine time window, fallback to rolling 24h if not available
-  const { from, to } = useMemo(() => {
-    if (selectedDate) {
-      // Use selected date's UTC day range: 00:00:00Z to 23:59:59Z (or now if today)
-      const dayStart = new Date(`${selectedDate}T00:00:00.000Z`)
-      const dayEnd = new Date(`${selectedDate}T23:59:59.999Z`)
-      const now = new Date()
-      const effectiveTo = dayEnd > now ? now : dayEnd
-      console.log('[EventDetail] Using selected date range', { selectedDate, from: dayStart.toISOString(), to: effectiveTo.toISOString() })
-      return { from: dayStart, to: effectiveTo }
-    } else {
-      // Fallback to rolling 24h window
-      const fromDate = new Date(Date.now() - timeRangeHours * 60 * 60 * 1000)
-      const toDate = new Date()
-      console.log('[EventDetail] Using rolling time range', { timeRangeHours, from: fromDate.toISOString(), to: toDate.toISOString() })
-      return { from: fromDate, to: toDate }
-    }
-  }, [selectedDate, timeRangeHours])
+  const [lastRequestInfo, setLastRequestInfo] = useState<{ buckets?: string; ticks?: { from_ts: string; to_ts: string } }>({})
+  const [bucketListVisible, setBucketListVisible] = useState(50)
 
   useEffect(() => {
     console.log('[EventDetail] Loading meta for marketId', { marketId })
@@ -138,25 +113,25 @@ export function EventDetail({
       .finally(() => setLoadingMeta(false))
   }, [marketId])
 
-  const loadTimeseries = useCallback(() => {
-    const from_ts = from.toISOString()
-    const to_ts = to.toISOString()
-    setLastRequestInfo((prev) => ({ ...prev, timeseries: { from_ts, to_ts } }))
-    setLoadingTs(true)
-    fetchEventTimeseries(marketId, from, to, 15)
-      .then((data: TimeseriesPoint[]) => {
-        setTimeseries(data)
+  const loadBuckets = useCallback(() => {
+    const apiBase = getApiBase()
+    const bucketsUrl = `${apiBase}/events/${encodeURIComponent(marketId)}/buckets`
+    setLastRequestInfo((prev) => ({ ...prev, buckets: bucketsUrl }))
+    setLoadingBuckets(true)
+    fetchEventBuckets(marketId)
+      .then((data: BucketItem[]) => {
+        setBuckets(data)
       })
       .catch((e: unknown) => {
-        console.error('[EventDetail] Timeseries load error', e)
-        setTimeseries([])
+        console.error('[EventDetail] Buckets load error', e)
+        setBuckets([])
       })
-      .finally(() => setLoadingTs(false))
-  }, [marketId, from, to])
+      .finally(() => setLoadingBuckets(false))
+  }, [marketId])
 
   useEffect(() => {
-    loadTimeseries()
-  }, [loadTimeseries])
+    loadBuckets()
+  }, [loadBuckets])
 
   // Load ticks for selected bucket
   const loadTicks = useCallback(() => {
@@ -190,23 +165,23 @@ export function EventDetail({
     loadTicks()
   }, [loadTicks])
   
-  // Auto-select latest bucket when timeseries loads
+  // Auto-select latest bucket when buckets load (buckets are oldest first; latest = last)
   useEffect(() => {
-    if (timeseries.length > 0 && !selectedBucket) {
-      const latest = timeseries[timeseries.length - 1]
-      if (latest.snapshot_at) {
-        setSelectedBucket(latest.snapshot_at)
+    if (buckets.length > 0 && !selectedBucket) {
+      const latest = buckets[buckets.length - 1]
+      if (latest.bucket_start) {
+        setSelectedBucket(latest.bucket_start)
       }
     }
-  }, [timeseries, selectedBucket])
+  }, [buckets, selectedBucket])
 
-  const chartData = timeseries.map((p) => ({
-    time: p.snapshot_at
+  const chartData = buckets.map((p) => ({
+    time: p.bucket_start
       ? (useUtc
-          ? new Date(p.snapshot_at).toLocaleTimeString('en-GB', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' })
-          : new Date(p.snapshot_at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }))
+          ? new Date(p.bucket_start).toLocaleTimeString('en-GB', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' })
+          : new Date(p.bucket_start).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }))
       : '',
-    fullTime: p.snapshot_at,
+    fullTime: p.bucket_start,
     home_back: p.home_best_back ?? null,
     away_back: p.away_best_back ?? null,
     draw_back: p.draw_best_back ?? null,
@@ -215,11 +190,11 @@ export function EventDetail({
     away_book_risk_l3: p.away_book_risk_l3 ?? null,
     draw_book_risk_l3: p.draw_book_risk_l3 ?? null,
   }))
-  const hasBookRiskL3 = timeseries.some((p) => p.home_book_risk_l3 != null || p.away_book_risk_l3 != null || p.draw_book_risk_l3 != null)
+  const hasBookRiskL3 = buckets.some((p) => p.home_book_risk_l3 != null || p.away_book_risk_l3 != null || p.draw_book_risk_l3 != null)
 
   // Find selected bucket data
-  const selectedBucketData = selectedBucket 
-    ? timeseries.find(p => p.snapshot_at === selectedBucket) 
+  const selectedBucketData = selectedBucket
+    ? buckets.find((p) => p.bucket_start === selectedBucket)
     : null
   
   const homeSpread = selectedBucketData ? spread(selectedBucketData.home_best_back, selectedBucketData.home_best_lay) : null
@@ -375,22 +350,13 @@ export function EventDetail({
           </Dialog>
 
           <Typography variant="subtitle1" sx={{ mb: 1 }}>History (15‑min snapshots)</Typography>
-          <ToggleButtonGroup
-            value={timeRangeHours}
-            exclusive
-            onChange={(_, v) => v != null && setTimeRangeHours(v)}
-            size="small"
-            sx={{ mb: 2 }}
-          >
-            {TIME_RANGES.map(({ label, hours }) => (
-              <ToggleButton key={hours} value={hours}>
-                {label}
-              </ToggleButton>
-            ))}
-          </ToggleButtonGroup>
 
-          {loadingTs ? (
-            <Typography color="text.secondary">Loading time series…</Typography>
+          {loadingBuckets ? (
+            <Typography color="text.secondary">Loading buckets…</Typography>
+          ) : buckets.length === 0 ? (
+            <Typography color="text.secondary" sx={{ mb: 2 }}>
+              No 15-minute snapshots available for this market.
+            </Typography>
           ) : (
             <>
               {/* Chart 1: Risk (Book Risk L3) */}
@@ -415,21 +381,26 @@ export function EventDetail({
               {/* Bucket Selection */}
               <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>Select 15-minute bucket</Typography>
               <Box sx={{ mb: 2, display: 'flex', flexWrap: 'wrap', gap: 1 }}>
-                {timeseries.map((point) => (
+                {buckets.slice(0, bucketListVisible).map((point) => (
                   <Button
-                    key={point.snapshot_at || Math.random()}
-                    variant={selectedBucket === point.snapshot_at ? 'contained' : 'outlined'}
+                    key={point.bucket_start}
+                    variant={selectedBucket === point.bucket_start ? 'contained' : 'outlined'}
                     size="small"
-                    onClick={() => setSelectedBucket(point.snapshot_at || null)}
+                    onClick={() => setSelectedBucket(point.bucket_start)}
                     sx={{ minWidth: 'auto' }}
                   >
-                    {point.snapshot_at
+                    {point.bucket_start
                       ? (useUtc
-                          ? new Date(point.snapshot_at).toLocaleTimeString('en-GB', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' })
-                          : new Date(point.snapshot_at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }))
+                          ? new Date(point.bucket_start).toLocaleTimeString('en-GB', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' })
+                          : new Date(point.bucket_start).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }))
                       : '—'}
                   </Button>
                 ))}
+                {buckets.length > bucketListVisible && (
+                  <Button size="small" variant="outlined" onClick={() => setBucketListVisible((n) => n + 50)}>
+                    Show more ({buckets.length - bucketListVisible} more)
+                  </Button>
+                )}
               </Box>
 
               {/* 15-Minute Median Matrix */}
@@ -496,6 +467,7 @@ export function EventDetail({
                   {(() => {
                     const bucketStart = new Date(selectedBucket)
                     const bucketEnd = new Date(bucketStart.getTime() + 15 * 60 * 1000)
+                    const tickCountDisplay = selectedBucketData?.tick_count ?? ticks.length
                     const firstTick = ticks.length > 0 ? ticks[0]?.publish_time : null
                     const lastTick = ticks.length > 0 ? ticks[ticks.length - 1]?.publish_time : null
                     const mediansNonNull = selectedBucketData && (
@@ -505,7 +477,7 @@ export function EventDetail({
                     return (
                       <>
                         <Box sx={{ mb: 1, fontSize: '0.8rem', color: 'text.secondary' }}>
-                          bucket_start: {formatTime(selectedBucket, useUtc)} · bucket_end: {formatTime(bucketEnd.toISOString(), useUtc)} · tick_count: {ticks.length}
+                          bucket_start: {formatTime(selectedBucket, useUtc)} · bucket_end: {formatTime(bucketEnd.toISOString(), useUtc)} · tick_count: {tickCountDisplay}
                           {firstTick != null && <> · first_tick: {formatTime(firstTick, useUtc)}</>}
                           {lastTick != null && <> · last_tick: {formatTime(lastTick, useUtc)}</>}
                         </Box>
@@ -571,10 +543,10 @@ export function EventDetail({
               <Paper variant="outlined" sx={{ p: 1.5, mb: 2, fontFamily: 'monospace', fontSize: '0.75rem' }}>
                 <Typography variant="caption" color="text.secondary" display="block">API base</Typography>
                 <Typography component="code">{getApiBase()}</Typography>
-                {lastRequestInfo.timeseries && (
+                {lastRequestInfo.buckets && (
                   <>
-                    <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Timeseries</Typography>
-                    <Typography component="code">GET {getApiBase()}/events/{marketId}/timeseries?from_ts={lastRequestInfo.timeseries.from_ts}&to_ts={lastRequestInfo.timeseries.to_ts}&interval_minutes=15</Typography>
+                    <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>Buckets</Typography>
+                    <Typography component="code">GET {lastRequestInfo.buckets}</Typography>
                   </>
                 )}
                 {lastRequestInfo.ticks && (
@@ -598,7 +570,7 @@ export function EventDetail({
                 Stream source: full raw snapshots are not stored; tick data is retained per retention policy. “No raw snapshot” here is not data loss.
               </Typography>
             )}
-            {selectedBucketData && timeseries.length > 0 && (
+            {selectedBucketData && buckets.length > 0 && (
               <Typography variant="body2" sx={{ mt: 0.5 }}>
                 Selected bucket: {formatBucketTime(selectedBucket)}.
                 {selectedBucketData.depth_limit != null && ` depth_limit: ${selectedBucketData.depth_limit}.`}

@@ -181,14 +181,14 @@ public class BettingApiClient {
         return MarketMetadataRecord.fromCatalogue(marketId, eventId, eventName, competitionId, competitionName, marketStartTime, runners, marketType);
     }
 
-    /** Event type 1 = Soccer. Used for priority subscription (top 40 events x 5 market types). */
-    private static final String[] PRIORITY_MARKET_TYPES = {
-            "MATCH_ODDS", "HALF_TIME", "OVER_UNDER_25", "OVER_UNDER_05", "NEXT_GOAL"
+    /** Full-Time only: Soccer. No Half-Time. Used for priority fallback when DB has no markets. */
+    private static final String[] PRIORITY_MARKET_TYPES_FT = {
+            "MATCH_ODDS_FT", "OVER_UNDER_25_FT", "NEXT_GOAL"
     };
 
     /**
-     * List soccer markets by event type and market types, sorted by MAXIMUM_TRADED.
-     * Used to resolve top 40 events x 5 markets (max 200) for subscription.
+     * List soccer markets by event type and FT market types, sorted by MAXIMUM_TRADED.
+     * Used as fallback when active_markets_to_stream is empty. No cap; Betfair maxResults limit applies.
      */
     public List<PriorityMarketRow> listMarketCatalogueForPriority(String sessionToken) {
         if (sessionToken == null || sessionToken.isBlank()) {
@@ -200,7 +200,7 @@ public class BettingApiClient {
         eventTypeIds.add("1"); // Soccer
         filter.set("eventTypeIds", eventTypeIds);
         ArrayNode marketTypeCodes = objectMapper.createArrayNode();
-        for (String mt : PRIORITY_MARKET_TYPES) {
+        for (String mt : PRIORITY_MARKET_TYPES_FT) {
             marketTypeCodes.add(mt);
         }
         filter.set("marketTypeCodes", marketTypeCodes);
@@ -209,7 +209,7 @@ public class BettingApiClient {
         projections.add("EVENT").add("MARKET_DESCRIPTION");
         params.set("marketProjection", projections);
         params.put("sort", "MAXIMUM_TRADED");
-        params.put("maxResults", 200);
+        params.put("maxResults", 1000);
         params.put("locale", "en");
 
         ObjectNode request = objectMapper.createObjectNode();

@@ -23,9 +23,9 @@ public class SubscriptionManager {
     private static final Logger log = LoggerFactory.getLogger(SubscriptionManager.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    /** 5 market types: Match Odds, Half Time, O/U 2.5 FT, O/U 0.5 HT, Next Goal (40 events x 5 = 200 max) */
-    private static final String[] SOCCER_MARKET_TYPES = {
-            "MATCH_ODDS", "HALF_TIME", "OVER_UNDER_25", "OVER_UNDER_05", "NEXT_GOAL"
+    /** Full-Time only: Match Odds FT, O/U 2.5 FT, Next Goal. No Half-Time markets. */
+    private static final String[] SOCCER_MARKET_TYPES_FT = {
+            "MATCH_ODDS_FT", "OVER_UNDER_25_FT", "NEXT_GOAL"
     };
 
     private static final String[] MARKET_DATA_FIELDS = {
@@ -37,8 +37,11 @@ public class SubscriptionManager {
     private final int conflateMs;
     private final int ladderLevels;
     private final List<String> configMarketIds;
-    /** Runtime priority list (40 events x 5 markets); set before first subscribe. */
+    /** Runtime list: market IDs from DB (active_markets_to_stream) or priority/config. Set before first subscribe. */
     private final List<String> priorityMarketIds = new CopyOnWriteArrayList<>();
+
+    /** When non-empty, each sublist is sent as a separate subscription (batch). Max 200 per batch (Betfair limit). */
+    private volatile List<List<String>> batchedMarketIds = List.of();
 
     /** Last subscription id used (for resubscribe we use same criteria, new id optional). */
     private int lastSubscriptionId = 2;
@@ -69,13 +72,26 @@ public class SubscriptionManager {
         this.configMarketIds = ids;
     }
 
-    /** Set priority market IDs (e.g. from PriorityMarketResolver). Used for subscribe when non-empty. */
+    /** Set market IDs to subscribe to (e.g. from ActiveMarketsFromDb or PriorityMarketResolver). */
     public void setPriorityMarketIds(List<String> ids) {
         priorityMarketIds.clear();
         if (ids != null && !ids.isEmpty()) {
             priorityMarketIds.addAll(ids);
         }
-        log.info("Subscription market list set to {} IDs (priority)", priorityMarketIds.size());
+        batchedMarketIds = List.of();
+        log.info("Subscription market list set to {} IDs", priorityMarketIds.size());
+    }
+
+    /** Set batched market IDs (e.g. from ActiveMarketsFromDb.loadActiveMarketIds() + batch). Each batch sent as separate subscription. */
+    public void setBatchedMarketIds(List<List<String>> batches) {
+        if (batches != null && !batches.isEmpty()) {
+            batchedMarketIds = new CopyOnWriteArrayList<>(batches);
+            priorityMarketIds.clear();
+            int total = batches.stream().mapToInt(List::size).sum();
+            log.info("Subscription set to {} batches, {} total market IDs", batches.size(), total);
+        } else {
+            batchedMarketIds = List.of();
+        }
     }
 
     /**
@@ -83,6 +99,11 @@ public class SubscriptionManager {
      * When initialClk/clk are set (after first initial image), pass them for RESUB_DELTA recovery.
      */
     public String buildMarketSubscriptionPayload(int id, String initialClk, String clk) {
+        return buildMarketSubscriptionPayloadForIds(id, null, initialClk, clk);
+    }
+
+    /** Build one subscription payload for a specific list of market IDs (used for DB-sourced batches). */
+    public String buildMarketSubscriptionPayloadForIds(int id, List<String> marketIds, String initialClk, String clk) {
         ObjectNode root = MAPPER.createObjectNode();
         root.put("op", "marketSubscription");
         root.put("id", id);
@@ -96,7 +117,8 @@ public class SubscriptionManager {
         }
 
         ObjectNode marketFilter = MAPPER.createObjectNode();
-        List<String> idsToUse = !priorityMarketIds.isEmpty() ? priorityMarketIds : configMarketIds;
+        List<String> idsToUse = (marketIds != null && !marketIds.isEmpty()) ? marketIds
+                : (!priorityMarketIds.isEmpty() ? priorityMarketIds : configMarketIds);
         if (idsToUse != null && !idsToUse.isEmpty()) {
             ArrayNode ids = MAPPER.createArrayNode();
             idsToUse.forEach(ids::add);
@@ -106,7 +128,7 @@ public class SubscriptionManager {
             eventTypeIds.add("1"); // Football
             marketFilter.set("eventTypeIds", eventTypeIds);
             ArrayNode marketTypeCodes = MAPPER.createArrayNode();
-            for (String mt : SOCCER_MARKET_TYPES) {
+            for (String mt : SOCCER_MARKET_TYPES_FT) {
                 marketTypeCodes.add(mt);
             }
             marketFilter.set("marketTypeCodes", marketTypeCodes);
@@ -133,6 +155,25 @@ public class SubscriptionManager {
         return buildMarketSubscriptionPayload(lastSubscriptionId, null, null);
     }
 
+    /** Returns multiple payloads when using DB-sourced batches (one payload per batch, id 2, 3, 4, ...). Otherwise single payload. */
+    public List<String> getInitialSubscriptionPayloads() {
+        lastSubscriptionId = 2;
+        lastInitialClk = null;
+        lastClk = null;
+        if (batchedMarketIds != null && !batchedMarketIds.isEmpty()) {
+            List<String> payloads = new java.util.ArrayList<>();
+            int id = 2;
+            for (List<String> batch : batchedMarketIds) {
+                if (!batch.isEmpty()) {
+                    payloads.add(buildMarketSubscriptionPayloadForIds(id++, batch, null, null));
+                }
+            }
+            lastSubscriptionId = id - 1;
+            return payloads;
+        }
+        return List.of(getInitialSubscriptionPayload());
+    }
+
     /** Returns subscription payload for resubscribe; uses stored initialClk/clk when available. */
     public String getResubscribePayload() {
         int id = lastSubscriptionId;
@@ -140,6 +181,23 @@ public class SubscriptionManager {
         String c = lastClk;
         log.debug("Resubscribe payload id={} initialClk={} clk={}", id, ic != null ? "set" : "null", c != null ? "set" : "null");
         return buildMarketSubscriptionPayload(id, ic, c);
+    }
+
+    /** Returns multiple resubscribe payloads when using batches. */
+    public List<String> getResubscribePayloads() {
+        String ic = lastInitialClk;
+        String c = lastClk;
+        if (batchedMarketIds != null && !batchedMarketIds.isEmpty()) {
+            List<String> payloads = new java.util.ArrayList<>();
+            int id = 2;
+            for (List<String> batch : batchedMarketIds) {
+                if (!batch.isEmpty()) {
+                    payloads.add(buildMarketSubscriptionPayloadForIds(id++, batch, ic, c));
+                }
+            }
+            return payloads;
+        }
+        return List.of(getResubscribePayload());
     }
 
     /** Update stored clock tokens from a change message (mcm). Call from message handler. */

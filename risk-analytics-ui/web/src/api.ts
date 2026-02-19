@@ -101,6 +101,13 @@ export type TimeseriesPoint = {
   draw_update_count?: number
 }
 
+/** Single 15-min bucket from GET /events/{market_id}/buckets (all available, no window filter). */
+export type BucketItem = TimeseriesPoint & {
+  bucket_start: string
+  bucket_end: string
+  tick_count: number
+}
+
 export type TickRow = {
   publish_time: string | null
   selection_id: number | null
@@ -411,6 +418,29 @@ export async function fetchEventTimeseries(
     return []
   }
   return parsed as TimeseriesPoint[]
+}
+
+/** All 15-min buckets for a market. Default: last 180 min. Pass from_ts/to_ts for custom range. */
+export async function fetchEventBuckets(
+  marketId: string,
+  fromTs?: string | null,
+  toTs?: string | null
+): Promise<BucketItem[]> {
+  const apiBase = getApiBase()
+  const params = new URLSearchParams()
+  if (fromTs) params.set('from_ts', fromTs)
+  if (toTs) params.set('to_ts', toTs)
+  const qs = params.toString()
+  const url = `${apiBase}/events/${encodeURIComponent(marketId)}/buckets${qs ? `?${qs}` : ''}`
+  const res = await fetch(url)
+  const raw = await res.text()
+  if (!res.ok) {
+    console.error('[api] fetchEventBuckets error', { status: res.status, statusText: res.statusText, body: raw })
+    throw new Error(res.statusText)
+  }
+  const parsed = JSON.parse(raw)
+  if (!Array.isArray(parsed)) return []
+  return parsed as BucketItem[]
 }
 
 /** Book Risk focus: all events in window with latest metrics including Book Risk L3. */

@@ -86,7 +86,7 @@ docker exec netbet-postgres psql -U netbet -d netbet -t -c "SELECT count(*) FROM
 docker exec netbet-postgres psql -U netbet -d netbet -c "SELECT m.market_type, count(*) FROM ladder_levels_20260205 l JOIN markets m ON l.market_id = m.market_id GROUP BY m.market_type ORDER BY m.market_type;"
 ```
 
-(Replace `20260205` with current UTC date `YYYYMMDD` if different.) Expect all 5 types: MATCH_ODDS_FT, OVER_UNDER_25_FT, HALF_TIME_RESULT, OVER_UNDER_05_HT, NEXT_GOAL.
+(Replace `20260205` with current UTC date `YYYYMMDD` if different.) Expect all 5 types: MATCH_ODDS_FT, OVER_UNDER_25_FT, OVER_UNDER_05_HT, MATCH_ODDS_HT, NEXT_GOAL.
 
 ---
 
