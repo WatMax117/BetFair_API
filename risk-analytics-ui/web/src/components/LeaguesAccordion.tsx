@@ -4,7 +4,7 @@ import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
 import TextField from '@mui/material/TextField'
 import { SortedEventsList, loadSortState, type SortState } from './SortedEventsList'
-import { fetchEventsByDateSnapshots } from '../api'
+import { fetchEventsByDateSnapshots, fetchDataHorizon } from '../api'
 import type { EventItem } from '../api'
 
 /** Today's date in UTC as YYYY-MM-DD (for default and date input). */
@@ -26,6 +26,32 @@ function getTomorrowUTC(): string {
   return d.toISOString().slice(0, 10)
 }
 
+/** Allowed = (date >= minDate) AND (no days list yet OR day is in allowedDays with ladder_rows > 0). */
+function isDateAllowed(
+  date: string,
+  minDate: string,
+  allowedDays: Set<string> | null
+): boolean {
+  if (date < minDate) return false
+  if (!allowedDays || allowedDays.size === 0) return true
+  return allowedDays.has(date)
+}
+
+/** Nearest allowed date: largest allowed date <= date, or earliest allowed if date is before all. */
+function nearestPreviousAllowedDate(
+  date: string,
+  allowedDaysAsc: string[],
+  minDate: string
+): string {
+  if (allowedDaysAsc.length === 0) return date >= minDate ? date : minDate
+  let best = allowedDaysAsc[0]
+  for (const d of allowedDaysAsc) {
+    if (d > date) break
+    best = d
+  }
+  return best
+}
+
 export function LeaguesAccordion({ 
   onSelectEvent, 
   onDateChange 
@@ -38,6 +64,12 @@ export function LeaguesAccordion({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [sortState, setSortState] = useState<SortState>(loadSortState)
+  const [dataHorizon, setDataHorizon] = useState<{
+    minDate: string
+    hint: string
+    allowedDays: Set<string>
+    allowedDaysAsc: string[]
+  } | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -67,6 +99,36 @@ export function LeaguesAccordion({
   }, [load])
 
   useEffect(() => {
+    let cancelled = false
+    fetchDataHorizon()
+      .then((h) => {
+        if (cancelled) return
+        const oldestTick = h.oldest_tick
+        const minDate = oldestTick ? oldestTick.slice(0, 10) : ''
+        const daysWithData = (h.days ?? []).filter((d) => d.ladder_rows > 0).map((d) => d.day)
+        const allowedDays = new Set(daysWithData)
+        const allowedDaysAsc = [...daysWithData].sort()
+        setDataHorizon({
+          minDate,
+          hint: minDate ? `Streaming data available from: ${minDate} (UTC)` : 'No streaming data yet',
+          allowedDays,
+          allowedDaysAsc,
+        })
+        setSelectedDate((prev) => {
+          if (!minDate) return prev
+          if (!isDateAllowed(prev, minDate, allowedDays.size > 0 ? allowedDays : null)) {
+            return nearestPreviousAllowedDate(prev, allowedDaysAsc, minDate)
+          }
+          return prev
+        })
+      })
+      .catch(() => {
+        if (!cancelled) setDataHorizon(null)
+      })
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
     if (onDateChange) {
       onDateChange(selectedDate)
     }
@@ -78,17 +140,54 @@ export function LeaguesAccordion({
         Events by date (snapshot-driven)
       </Typography>
 
+      {dataHorizon?.hint && (
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+          {dataHorizon.hint}
+        </Typography>
+      )}
       <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, alignItems: 'center', mb: 2 }}>
         <TextField
           type="date"
           label="Date (UTC)"
           value={selectedDate}
-          onChange={(e) => setSelectedDate(e.target.value || getTodayUTC())}
+          onChange={(e) => {
+            const value = e.target.value || getTodayUTC()
+            if (!dataHorizon) {
+              setSelectedDate(value)
+              return
+            }
+            const allowed = dataHorizon.allowedDays.size > 0 ? dataHorizon.allowedDays : null
+            if (isDateAllowed(value, dataHorizon.minDate, allowed)) {
+              setSelectedDate(value)
+              return
+            }
+            setSelectedDate(nearestPreviousAllowedDate(value, dataHorizon.allowedDaysAsc, dataHorizon.minDate))
+          }}
+          inputProps={
+            dataHorizon?.minDate
+              ? { min: dataHorizon.minDate }
+              : undefined
+          }
           InputLabelProps={{ shrink: true }}
           size="small"
           sx={{ width: 160 }}
         />
-        <Button variant="outlined" size="small" onClick={() => setSelectedDate(getYesterdayUTC())}>
+        <Button
+          variant="outlined"
+          size="small"
+          onClick={() => {
+            const d = getYesterdayUTC()
+            if (!dataHorizon) {
+              setSelectedDate(d)
+              return
+            }
+            const allowed = dataHorizon.allowedDays.size > 0 ? dataHorizon.allowedDays : null
+            const clamped = isDateAllowed(d, dataHorizon.minDate, allowed)
+              ? d
+              : nearestPreviousAllowedDate(d, dataHorizon.allowedDaysAsc, dataHorizon.minDate)
+            setSelectedDate(clamped)
+          }}
+        >
           Yesterday
         </Button>
         <Button variant="outlined" size="small" onClick={() => setSelectedDate(getTodayUTC())}>

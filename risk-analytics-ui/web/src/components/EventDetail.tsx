@@ -115,10 +115,10 @@ export function EventDetail({
 
   const loadBuckets = useCallback(() => {
     const apiBase = getApiBase()
-    const bucketsUrl = `${apiBase}/events/${encodeURIComponent(marketId)}/buckets`
+    const bucketsUrl = `${apiBase}/events/${encodeURIComponent(marketId)}/buckets?event_aware=true`
     setLastRequestInfo((prev) => ({ ...prev, buckets: bucketsUrl }))
     setLoadingBuckets(true)
-    fetchEventBuckets(marketId)
+    fetchEventBuckets(marketId, undefined, undefined, true)
       .then((data: BucketItem[]) => {
         setBuckets(data)
       })

@@ -45,6 +45,10 @@ export type EventItem = {
   home_book_risk_l3?: number | null
   away_book_risk_l3?: number | null
   draw_book_risk_l3?: number | null
+  /** Last stream tick time; null if no stream data. UI may mark row as stale when old. */
+  last_stream_update_at?: string | null
+  /** True when last_stream_update_at < now - 120 min; informational only, never excludes row. */
+  is_stale?: boolean
 }
 
 export type TimeseriesPoint = {
@@ -137,6 +141,19 @@ export type EventMeta = {
   supports_replay_snapshot?: boolean
   last_tick_time?: string | null
   retention_policy?: string | null
+  /** Event-aware bucket metadata (from actual tick data). */
+  bucket_interval_minutes?: number
+  earliest_bucket_start?: string | null
+  latest_bucket_start?: string | null
+}
+
+/** Response from GET /stream/events/{marketId}/available-buckets. */
+export type AvailableBuckets = {
+  market_id: string
+  bucket_interval_minutes: number
+  available_buckets: string[]
+  earliest_bucket: string | null
+  latest_bucket: string | null
 }
 
 /** Replay snapshot: reconstructed from ladder_levels (no raw payload). */
@@ -420,16 +437,18 @@ export async function fetchEventTimeseries(
   return parsed as TimeseriesPoint[]
 }
 
-/** All 15-min buckets for a market. Default: last 180 min. Pass from_ts/to_ts for custom range. */
+/** All 15-min buckets for a market. Default: last 180 min. Pass from_ts/to_ts for custom range. When eventAware=true, returns only buckets that have tick data for this market (no global time window). */
 export async function fetchEventBuckets(
   marketId: string,
   fromTs?: string | null,
-  toTs?: string | null
+  toTs?: string | null,
+  eventAware?: boolean
 ): Promise<BucketItem[]> {
   const apiBase = getApiBase()
   const params = new URLSearchParams()
   if (fromTs) params.set('from_ts', fromTs)
   if (toTs) params.set('to_ts', toTs)
+  if (eventAware) params.set('event_aware', 'true')
   const qs = params.toString()
   const url = `${apiBase}/events/${encodeURIComponent(marketId)}/buckets${qs ? `?${qs}` : ''}`
   const res = await fetch(url)
@@ -441,6 +460,16 @@ export async function fetchEventBuckets(
   const parsed = JSON.parse(raw)
   if (!Array.isArray(parsed)) return []
   return parsed as BucketItem[]
+}
+
+/** Event-aware bucket list: distinct 15-min bucket starts that have ticks for this market. */
+export async function fetchAvailableBuckets(marketId: string): Promise<AvailableBuckets> {
+  const apiBase = getApiBase()
+  const url = `${apiBase}/events/${encodeURIComponent(marketId)}/available-buckets`
+  const res = await fetch(url)
+  const raw = await res.text()
+  if (!res.ok) throw new Error(res.statusText)
+  return JSON.parse(raw) as AvailableBuckets
 }
 
 /** Book Risk focus: all events in window with latest metrics including Book Risk L3. */
@@ -465,6 +494,27 @@ export async function fetchBookRiskFocusEvents(
   const res = await fetch(`${getApiBase()}/events/book-risk-focus?${params}`)
   if (!res.ok) throw new Error(res.statusText)
   return res.json()
+}
+
+/** Streaming data horizon: oldest/newest tick, total_rows, optional days[] for calendar UX. */
+export type DataHorizon = {
+  oldest_tick: string | null
+  newest_tick: string | null
+  total_rows: number
+  days?: Array<{ day: string; ladder_rows: number; markets: number }>
+}
+
+/** Uses getApiBase() so path matches proxy: /api/stream/data-horizon when on stream UI; backend serves /stream/data-horizon (prefix stripped by proxy). */
+export async function fetchDataHorizon(): Promise<DataHorizon> {
+  const apiBase = getApiBase()
+  const url = `${apiBase}/data-horizon`
+  const res = await fetch(url)
+  const raw = await res.text()
+  if (!res.ok) {
+    console.error('[api] fetchDataHorizon error', { status: res.status, statusText: res.statusText, body: raw })
+    throw new Error(res.statusText)
+  }
+  return JSON.parse(raw) as DataHorizon
 }
 
 /** Snapshot-driven calendar: all events for a UTC day that have at least one snapshot. No limit, no Book Risk filter. */
