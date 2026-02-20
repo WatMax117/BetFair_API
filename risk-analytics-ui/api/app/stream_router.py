@@ -12,11 +12,14 @@ from app.db import cursor
 
 logger = logging.getLogger(__name__)
 from app.stream_data import (
-    STALE_MINUTES,
-    get_events_by_date_snapshots_stream,
+    get_events_by_date_rest_driven,
     get_event_timeseries_stream,
     get_event_buckets_stream_bulk,
+    get_data_horizon,
 )
+
+DATA_HORIZON_CACHE_TTL_SEC = 60
+_data_horizon_cache: dict = {"value": None, "expires_at": 0}
 
 
 def _parse_ts_stream(s: Optional[str], default: datetime) -> datetime:
@@ -31,12 +34,39 @@ def _parse_ts_stream(s: Optional[str], default: datetime) -> datetime:
 stream_router = APIRouter(tags=["stream"])
 
 
+@stream_router.get("/data-horizon")
+def stream_data_horizon():
+    """
+    Streaming data horizon: oldest_tick, newest_tick, total_rows.
+    Includes optional days[] for calendar UX (dates with ladder data).
+    Cached 60 seconds to avoid heavy scans.
+
+    Route: app mounts this router at prefix /stream, so full path is /stream/data-horizon.
+    Behind a proxy that strips /api, the UI calls /api/stream/data-horizon; proxy forwards
+    to backend as /stream/data-horizon. On VPS verify which works:
+      curl -sS http://localhost:8000/stream/data-horizon | head
+      curl -sS http://localhost:8000/api/stream/data-horizon | head
+    The path the UI uses must match (getApiBase() + '/data-horizon' = /api/stream/data-horizon when on stream UI).
+    """
+    now_ts = time.time()
+    if _data_horizon_cache["value"] is not None and now_ts < _data_horizon_cache["expires_at"]:
+        return _data_horizon_cache["value"]
+    result = get_data_horizon(include_days=True, days_limit=90)
+    _data_horizon_cache["value"] = result
+    _data_horizon_cache["expires_at"] = now_ts + DATA_HORIZON_CACHE_TTL_SEC
+    return result
+
+
 @stream_router.get("/events/by-date-snapshots")
 def stream_events_by_date_snapshots(
     date: str = Query(..., description="UTC date YYYY-MM-DD"),
 ):
-    """Snapshot-driven calendar from stream_ingest; 15-min UTC buckets; staleness > {} min excludes market.""".format(STALE_MINUTES)
-    events = get_events_by_date_snapshots_stream(date)
+    """
+    REST as source of truth: rest_events + rest_markets define event list.
+    Streaming enriches only (LEFT JOIN); no exclusion for missing stream or staleness.
+    Returns last_stream_update_at, is_stale for UI to mark stale rows.
+    """
+    events = get_events_by_date_rest_driven(date)
     return events
 
 
