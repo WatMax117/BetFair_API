@@ -14,9 +14,13 @@ import ListItemText from '@mui/material/ListItemText'
 import { fetchEventsByDateSnapshots, fetchDataHorizon } from '../api'
 import type { EventItem } from '../api'
 
-/** Today's date in UTC as YYYY-MM-DD (for default and date input). */
+/** Today's date in UTC as YYYY-MM-DD. Uses UTC date parts to avoid local↔UTC shift. */
 function getTodayUTC(): string {
-  return new Date().toISOString().slice(0, 10)
+  const d = new Date()
+  const y = d.getUTCFullYear()
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0')
+  const day = String(d.getUTCDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
 }
 
 /** Add N days to a YYYY-MM-DD string, return YYYY-MM-DD. */
@@ -26,19 +30,20 @@ function addDays(dateStr: string, n: number): string {
   return d.toISOString().slice(0, 10)
 }
 
-/** Allowed = (date >= minDate) AND (no days list yet OR day is in allowedDays with ladder_rows > 0). */
+/** Allowed = (date >= minDate) AND (today UTC is always allowed when >= minDate) AND (no days list yet OR day is in allowedDays). */
 function isDateAllowed(
   date: string,
   minDate: string,
   allowedDays: Set<string> | null
 ): boolean {
   if (date < minDate) return false
+  if (date === getTodayUTC() && date >= minDate) return true
   if (!allowedDays || allowedDays.size === 0) return true
   return allowedDays.has(date)
 }
 
 /** Nearest allowed date: largest allowed date <= date, or earliest allowed if date is before all. */
-function nearestPreviousAllowedDate(
+function nearestAllowedDate(
   date: string,
   allowedDaysAsc: string[],
   minDate: string
@@ -94,8 +99,8 @@ function CompetitionAccordion({
       <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
         Events for {selectedDate} (UTC), grouped by competition. Competitions by event count desc; events by volume desc.
       </Typography>
-      {grouped.map(({ name, events: evs }, idx) => (
-        <Accordion key={name} defaultExpanded={idx === 0}>
+      {grouped.map(({ name, events: evs }) => (
+        <Accordion key={name}>
           <AccordionSummary expandIcon={<ExpandMoreIcon />}>
             <Typography>
               {name} ({evs.length})
@@ -188,10 +193,8 @@ export function LeaguesAccordion({
         })
         setSelectedDate((prev) => {
           if (!minDate) return prev
-          if (!isDateAllowed(prev, minDate, allowedDays.size > 0 ? allowedDays : null)) {
-            return nearestPreviousAllowedDate(prev, allowedDaysAsc, minDate)
-          }
-          return prev
+          if (isDateAllowed(prev, minDate, allowedDays.size > 0 ? allowedDays : null)) return prev
+          return nearestAllowedDate(prev, allowedDaysAsc, minDate)
         })
       })
       .catch(() => {
@@ -233,7 +236,7 @@ export function LeaguesAccordion({
               setSelectedDate(value)
               return
             }
-            setSelectedDate(nearestPreviousAllowedDate(value, dataHorizon.allowedDaysAsc, dataHorizon.minDate))
+            setSelectedDate(nearestAllowedDate(value, dataHorizon.allowedDaysAsc, dataHorizon.minDate))
           }}
           inputProps={
             dataHorizon?.minDate
@@ -256,7 +259,7 @@ export function LeaguesAccordion({
             const allowed = dataHorizon.allowedDays.size > 0 ? dataHorizon.allowedDays : null
             const clamped = isDateAllowed(d, dataHorizon.minDate, allowed)
               ? d
-              : nearestPreviousAllowedDate(d, dataHorizon.allowedDaysAsc, dataHorizon.minDate)
+              : nearestAllowedDate(d, dataHorizon.allowedDaysAsc, dataHorizon.minDate)
             setSelectedDate(clamped)
           }}
         >
@@ -274,7 +277,7 @@ export function LeaguesAccordion({
             const allowed = dataHorizon.allowedDays.size > 0 ? dataHorizon.allowedDays : null
             const clamped = isDateAllowed(d, dataHorizon.minDate, allowed)
               ? d
-              : nearestPreviousAllowedDate(d, dataHorizon.allowedDaysAsc, dataHorizon.minDate)
+              : nearestAllowedDate(d, dataHorizon.allowedDaysAsc, dataHorizon.minDate)
             setSelectedDate(clamped)
           }}
         >
