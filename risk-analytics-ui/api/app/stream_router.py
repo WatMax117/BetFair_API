@@ -15,7 +15,10 @@ from app.stream_data import (
     get_events_by_date_rest_driven,
     get_event_timeseries_stream,
     get_event_buckets_stream_bulk,
+    get_event_buckets_stream,
     get_data_horizon,
+    get_event_bucket_range,
+    get_available_bucket_starts,
 )
 
 DATA_HORIZON_CACHE_TTL_SEC = 60
@@ -79,11 +82,17 @@ def stream_event_buckets(
     market_id: str,
     from_ts: Optional[str] = Query(None, description="Start time (ISO 8601 UTC). Default: now - 180 min"),
     to_ts: Optional[str] = Query(None, description="End time (ISO 8601 UTC). Default: now"),
+    event_aware: bool = Query(False, description="If true, return only buckets that have tick data for this market (event-aware); ignores from_ts/to_ts default window."),
 ):
     """
     Bulk buckets: 3 DB queries total (metadata, ladder, liquidity). No per-bucket queries.
     Default: last 180 min (12 buckets). Same response shape as before.
+    When event_aware=true: returns all buckets that actually contain ticks for this market (no global time window).
     """
+    if event_aware:
+        buckets = get_event_buckets_stream(market_id)
+        logger.info("buckets_endpoint event_aware=true market_id=%s bucket_count=%d", market_id, len(buckets))
+        return buckets
     t_start = time.perf_counter()
     now = datetime.now(timezone.utc)
     to_dt = _parse_ts_stream(to_ts, now)
@@ -156,6 +165,14 @@ def stream_event_meta(market_id: str):
         if r and r.get("last_tick_time"):
             last_tick_time = r["last_tick_time"].isoformat() if hasattr(r["last_tick_time"], "isoformat") else str(r["last_tick_time"])
 
+    # Event-aware bucket metadata: from actual tick data (not global time)
+    bucket_range = get_event_bucket_range(market_id)
+    earliest_bucket_start = None
+    latest_bucket_start = None
+    if bucket_range:
+        earliest_bucket_start = bucket_range[0].isoformat()
+        latest_bucket_start = bucket_range[1].isoformat()
+
     return {
         "market_id": row["market_id"],
         "event_name": row["event_name"],
@@ -172,6 +189,28 @@ def stream_event_meta(market_id: str):
         "supports_replay_snapshot": True,
         "last_tick_time": last_tick_time,
         "retention_policy": "Tick data in stream_ingest.ladder_levels; 15-min aggregates derived at read. See RETENTION_MATRIX.md.",
+        "bucket_interval_minutes": 15,
+        "earliest_bucket_start": earliest_bucket_start,
+        "latest_bucket_start": latest_bucket_start,
+    }
+
+
+@stream_router.get("/events/{market_id}/available-buckets")
+def stream_event_available_buckets(market_id: str):
+    """
+    Distinct 15-min UTC bucket starts that have at least one tick for this market.
+    Source of truth for event-aware bucket selector; no global time window.
+    """
+    bucket_starts = get_available_bucket_starts(market_id)
+    available_buckets = [bt.isoformat() for bt in bucket_starts]
+    earliest_bucket = bucket_starts[0].isoformat() if bucket_starts else None
+    latest_bucket = bucket_starts[-1].isoformat() if bucket_starts else None
+    return {
+        "market_id": market_id,
+        "bucket_interval_minutes": 15,
+        "available_buckets": available_buckets,
+        "earliest_bucket": earliest_bucket,
+        "latest_bucket": latest_bucket,
     }
 
 

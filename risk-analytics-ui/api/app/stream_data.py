@@ -490,6 +490,242 @@ def get_stream_markets_with_ladder_for_date(from_dt: datetime, to_dt: datetime) 
         return [r["market_id"] for r in cur.fetchall()]
 
 
+# Market types shown in UI event list (same as active_markets_to_stream).
+# MATCH_ODDS_FT, OVER_UNDER_25_FT, NEXT_GOAL + OVER_UNDER_* FT (no HT).
+REST_EVENT_MARKET_TYPES = (
+    "market_type IN ('MATCH_ODDS_FT', 'OVER_UNDER_25_FT', 'NEXT_GOAL') "
+    "OR (market_type LIKE 'OVER_UNDER_%%' AND market_type NOT LIKE '%%HT%%')"
+)
+
+
+def get_data_horizon(include_days: bool = True, days_limit: int = 90) -> Dict[str, Any]:
+    """
+    Returns streaming data horizon: oldest_tick, newest_tick, total_rows.
+    Optional: days[] with ladder_rows and markets per day for calendar UX.
+    """
+    with cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                MIN(publish_time) AS oldest_tick,
+                MAX(publish_time) AS newest_tick,
+                COUNT(*) AS total_rows
+            FROM stream_ingest.ladder_levels
+            """,
+        )
+        row = cur.fetchone()
+    oldest = row["oldest_tick"] if row else None
+    newest = row["newest_tick"] if row else None
+    total_rows = int(row["total_rows"]) if row and row.get("total_rows") is not None else 0
+
+    result: Dict[str, Any] = {
+        "oldest_tick": oldest.isoformat() if oldest and hasattr(oldest, "isoformat") else (str(oldest) if oldest else None),
+        "newest_tick": newest.isoformat() if newest and hasattr(newest, "isoformat") else (str(newest) if newest else None),
+        "total_rows": total_rows,
+    }
+
+    if include_days and total_rows > 0:
+        with cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    date_trunc('day', publish_time) AS day,
+                    COUNT(*) AS ladder_rows,
+                    COUNT(DISTINCT market_id) AS markets
+                FROM stream_ingest.ladder_levels
+                WHERE publish_time >= now() - interval '1 day' * %s
+                GROUP BY 1
+                ORDER BY day DESC
+                LIMIT %s
+                """,
+                (days_limit, days_limit),
+            )
+            rows = cur.fetchall()
+        result["days"] = [
+            {
+                "day": r["day"].strftime("%Y-%m-%d") if r.get("day") and hasattr(r["day"], "strftime") else str(r.get("day", ""))[:10],
+                "ladder_rows": int(r["ladder_rows"]) if r.get("ladder_rows") is not None else 0,
+                "markets": int(r["markets"]) if r.get("markets") is not None else 0,
+            }
+            for r in rows
+        ]
+    else:
+        result["days"] = []
+
+    return result
+
+
+def get_events_by_date_rest_driven(date_str: str) -> List[Dict[str, Any]]:
+    """
+    REST as source of truth for event list. rest_events + rest_markets define existence.
+    Streaming is enrichment only: LEFT JOIN; no row excluded for missing stream or staleness.
+    Returns same EventItem shape; adds last_stream_update_at, is_stale.
+    """
+    try:
+        from_dt = datetime.strptime(date_str.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return []
+    to_dt = from_dt + timedelta(days=1)
+    now = datetime.now(timezone.utc)
+    effective_to_dt = min(to_dt, now)
+    bucket_times = _bucket_times_in_range(from_dt, effective_to_dt)
+    if not bucket_times:
+        bucket_times = [_bucket_15_utc(from_dt)]
+    latest_bucket = bucket_times[-1] if bucket_times else _bucket_15_utc(effective_to_dt - timedelta(seconds=1))
+    bucket_end = latest_bucket + timedelta(minutes=15)
+    effective_end = min(bucket_end, now)
+    stale_cutoff = now - timedelta(minutes=STALE_MINUTES)
+
+    # 1. Primary: rest_events + rest_markets, filtered by date and market type
+    with cursor() as cur:
+        cur.execute(
+            """
+            SELECT rm.market_id, rm.event_id, rm.market_type, rm.market_name,
+                   re.event_name AS re_event_name, re.home_team, re.away_team,
+                   re.open_date AS event_open_date, re.competition_name
+            FROM rest_markets rm
+            JOIN rest_events re ON re.event_id = rm.event_id
+            WHERE re.open_date >= %s AND re.open_date < %s
+              AND (""" + REST_EVENT_MARKET_TYPES + """)
+            ORDER BY COALESCE(re.open_date, '1970-01-01'::timestamp) ASC, rm.market_id
+            """,
+            (from_dt, to_dt),
+        )
+        primary_rows = cur.fetchall()
+
+    # 2. Batch-fetch metadata (LEFT JOIN semantics: may be missing)
+    market_ids = [r["market_id"] for r in primary_rows]
+    meta_by_market: Dict[str, Dict] = {}
+    if market_ids:
+        with cursor() as cur:
+            cur.execute(
+                """
+                SELECT market_id, event_name, event_open_date, competition_name,
+                       home_selection_id, away_selection_id, draw_selection_id
+                FROM market_event_metadata
+                WHERE market_id = ANY(%s)
+                """,
+                (market_ids,),
+            )
+            for row in cur.fetchall():
+                meta_by_market[row["market_id"]] = dict(row)
+
+    # 3. Batch-fetch last_stream_update_at per market
+    last_stream_by_market: Dict[str, Optional[datetime]] = {}
+    if market_ids:
+        with cursor() as cur:
+            cur.execute(
+                """
+                SELECT market_id, MAX(publish_time) AS last_pt
+                FROM stream_ingest.ladder_levels
+                WHERE market_id = ANY(%s)
+                GROUP BY market_id
+                """,
+                (market_ids,),
+            )
+            for row in cur.fetchall():
+                last_stream_by_market[row["market_id"]] = row["last_pt"] if row.get("last_pt") else None
+
+    result: List[Dict[str, Any]] = []
+    for m in primary_rows:
+        market_id = m["market_id"]
+        meta = meta_by_market.get(market_id)
+        last_stream = last_stream_by_market.get(market_id)
+        is_stale = last_stream is not None and last_stream < stale_cutoff if last_stream else False
+
+        event_name = (
+            (meta.get("event_name") if meta else None)
+            or m.get("re_event_name")
+            or (
+                f"{m.get('home_team') or 'Home'} vs {m.get('away_team') or 'Away'}"
+                if (m.get("home_team") or m.get("away_team"))
+                else None
+            )
+            or "Unknown event"
+        )
+        event_open_date = meta.get("event_open_date") if meta else m.get("event_open_date")
+        competition_name = (meta.get("competition_name") if meta else None) or m.get("competition_name")
+
+        home_sid = meta.get("home_selection_id") if meta else None
+        away_sid = meta.get("away_selection_id") if meta else None
+        draw_sid = meta.get("draw_selection_id") if meta else None
+
+        # Enrichment: only when stream data exists
+        home_bb = away_bb = draw_bb = None
+        home_bl = away_bl = draw_bl = None
+        total_volume = None
+        book_risk = None
+        impedance = None
+        home_seconds_covered = away_seconds_covered = draw_seconds_covered = 0.0
+        home_update_count = away_update_count = draw_update_count = 0
+
+        if last_stream is not None:
+            with cursor() as cur:
+                home_odds_median, home_size_median = (None, None)
+                away_odds_median, away_size_median = (None, None)
+                draw_odds_median, draw_size_median = (None, None)
+                if home_sid is not None:
+                    home_odds_median, home_size_median, home_seconds_covered, home_update_count = _compute_bucket_median_back_odds_and_size(
+                        cur, market_id, home_sid, latest_bucket, bucket_end, effective_end
+                    )
+                if away_sid is not None:
+                    away_odds_median, away_size_median, away_seconds_covered, away_update_count = _compute_bucket_median_back_odds_and_size(
+                        cur, market_id, away_sid, latest_bucket, bucket_end, effective_end
+                    )
+                if draw_sid is not None:
+                    draw_odds_median, draw_size_median, draw_seconds_covered, draw_update_count = _compute_bucket_median_back_odds_and_size(
+                        cur, market_id, draw_sid, latest_bucket, bucket_end, effective_end
+                    )
+                book_risk = compute_book_risk_from_medians(
+                    home_odds_median, home_size_median,
+                    away_odds_median, away_size_median,
+                    draw_odds_median, draw_size_median,
+                )
+                impedance = compute_impedance_index_from_medians(
+                    home_odds_median, home_size_median,
+                    away_odds_median, away_size_median,
+                    draw_odds_median, draw_size_median,
+                )
+                _, home_bb, away_bb, draw_bb, home_bl, away_bl, draw_bl, total_volume = _runners_from_ladder(
+                    cur, market_id, latest_bucket, home_sid, away_sid, draw_sid,
+                )
+
+        result.append({
+            "market_id": market_id,
+            "event_id": m.get("event_id"),
+            "event_name": event_name,
+            "event_open_date": event_open_date.isoformat() if event_open_date else None,
+            "competition_name": competition_name,
+            "latest_snapshot_at": latest_bucket.isoformat(),
+            "home_best_back": home_bb,
+            "away_best_back": away_bb,
+            "draw_best_back": draw_bb,
+            "home_best_lay": home_bl,
+            "away_best_lay": away_bl,
+            "draw_best_lay": draw_bl,
+            "total_volume": total_volume,
+            "depth_limit": DEPTH_LIMIT,
+            "calculation_version": "stream_15min",
+            "home_book_risk_l3": book_risk["home_book_risk_l3"] if book_risk else None,
+            "away_book_risk_l3": book_risk["away_book_risk_l3"] if book_risk else None,
+            "draw_book_risk_l3": book_risk["draw_book_risk_l3"] if book_risk else None,
+            "impedance_index_15m": impedance["impedance_index_15m"] if impedance else None,
+            "impedance_abs_diff_home": impedance["impedance_abs_diff_home"] if impedance else None,
+            "impedance_abs_diff_away": impedance["impedance_abs_diff_away"] if impedance else None,
+            "impedance_abs_diff_draw": impedance["impedance_abs_diff_draw"] if impedance else None,
+            "home_seconds_covered": home_seconds_covered,
+            "home_update_count": home_update_count,
+            "away_seconds_covered": away_seconds_covered,
+            "away_update_count": away_update_count,
+            "draw_seconds_covered": draw_seconds_covered,
+            "draw_update_count": draw_update_count,
+            "last_stream_update_at": last_stream.isoformat() if last_stream else None,
+            "is_stale": is_stale,
+        })
+
+    return result
+
+
 def get_events_by_date_snapshots_stream(date_str: str) -> List[Dict[str, Any]]:
     """
     Same shape as REST get_events_by_date_snapshots but from stream_ingest.
@@ -748,6 +984,61 @@ def get_event_timeseries_stream(
         })
 
     return out
+
+
+def get_available_bucket_starts(market_id: str) -> List[datetime]:
+    """
+    Distinct 15-min UTC bucket starts that have at least one tick in ladder_levels for this market.
+    Source of truth for event-aware bucket selector; no global time window.
+    """
+    with cursor() as cur:
+        cur.execute(
+            """
+            SELECT DISTINCT (
+                date_trunc('hour', publish_time)
+                + (floor(extract(minute from publish_time)::numeric / 15) * interval '15 min')
+            ) AS bucket_start
+            FROM stream_ingest.ladder_levels
+            WHERE market_id = %s
+            ORDER BY bucket_start
+            """,
+            (market_id,),
+        )
+        rows = cur.fetchall()
+    out: List[datetime] = []
+    for r in rows:
+        bt = r.get("bucket_start")
+        if bt is not None:
+            if hasattr(bt, "tzinfo") and bt.tzinfo is None:
+                bt = bt.replace(tzinfo=timezone.utc)
+            out.append(bt)
+    return out
+
+
+def get_event_bucket_range(market_id: str) -> Optional[Tuple[datetime, datetime]]:
+    """
+    Earliest and latest 15-min bucket start (UTC) for this market from actual tick data.
+    Returns (earliest_bucket_start, latest_bucket_start) or None if no ticks.
+    """
+    with cursor() as cur:
+        cur.execute(
+            """
+            SELECT MIN(publish_time) AS min_pt, MAX(publish_time) AS max_pt
+            FROM stream_ingest.ladder_levels
+            WHERE market_id = %s
+            """,
+            (market_id,),
+        )
+        row = cur.fetchone()
+    if not row or row.get("min_pt") is None or row.get("max_pt") is None:
+        return None
+    min_pt = row["min_pt"]
+    max_pt = row["max_pt"]
+    if min_pt.tzinfo is None:
+        min_pt = min_pt.replace(tzinfo=timezone.utc)
+    if max_pt.tzinfo is None:
+        max_pt = max_pt.replace(tzinfo=timezone.utc)
+    return (_bucket_15_utc(min_pt), _bucket_15_utc(max_pt))
 
 
 def _tick_count_in_bucket(cur: Any, market_id: str, bucket_start: datetime, bucket_end: datetime) -> int:
