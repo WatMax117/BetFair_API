@@ -1,9 +1,16 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import Typography from '@mui/material/Typography'
 import Box from '@mui/material/Box'
 import Button from '@mui/material/Button'
 import TextField from '@mui/material/TextField'
-import { SortedEventsList, loadSortState, type SortState } from './SortedEventsList'
+import Accordion from '@mui/material/Accordion'
+import AccordionSummary from '@mui/material/AccordionSummary'
+import AccordionDetails from '@mui/material/AccordionDetails'
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
+import List from '@mui/material/List'
+import ListItem from '@mui/material/ListItem'
+import ListItemButton from '@mui/material/ListItemButton'
+import ListItemText from '@mui/material/ListItemText'
 import { fetchEventsByDateSnapshots, fetchDataHorizon } from '../api'
 import type { EventItem } from '../api'
 
@@ -12,17 +19,10 @@ function getTodayUTC(): string {
   return new Date().toISOString().slice(0, 10)
 }
 
-/** Yesterday in UTC as YYYY-MM-DD. */
-function getYesterdayUTC(): string {
-  const d = new Date()
-  d.setUTCDate(d.getUTCDate() - 1)
-  return d.toISOString().slice(0, 10)
-}
-
-/** Tomorrow in UTC as YYYY-MM-DD. */
-function getTomorrowUTC(): string {
-  const d = new Date()
-  d.setUTCDate(d.getUTCDate() + 1)
+/** Add N days to a YYYY-MM-DD string, return YYYY-MM-DD. */
+function addDays(dateStr: string, n: number): string {
+  const d = new Date(dateStr + 'T12:00:00Z')
+  d.setUTCDate(d.getUTCDate() + n)
   return d.toISOString().slice(0, 10)
 }
 
@@ -52,6 +52,79 @@ function nearestPreviousAllowedDate(
   return best
 }
 
+/** Group events by competition, competitions sorted by count desc, events by volume desc. */
+function CompetitionAccordion({
+  events,
+  selectedDate,
+  onSelectEvent,
+}: {
+  events: EventItem[]
+  selectedDate: string
+  onSelectEvent: (e: EventItem) => void
+}) {
+  const grouped = useMemo(() => {
+    const byComp = new Map<string, EventItem[]>()
+    for (const e of events) {
+      const key = e.competition_name || 'Unknown'
+      if (!byComp.has(key)) byComp.set(key, [])
+      byComp.get(key)!.push(e)
+    }
+    for (const arr of byComp.values()) {
+      arr.sort((a, b) => {
+        const va = a.total_volume ?? -Infinity
+        const vb = b.total_volume ?? -Infinity
+        return vb - va
+      })
+    }
+    return [...byComp.entries()]
+      .map(([name, evs]) => ({ name, events: evs }))
+      .sort((a, b) => b.events.length - a.events.length)
+  }, [events])
+
+  if (events.length === 0) {
+    return (
+      <Typography variant="body2" color="text.secondary">
+        No events for {selectedDate} (UTC) with streaming data.
+      </Typography>
+    )
+  }
+
+  return (
+    <Box>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+        Events for {selectedDate} (UTC), grouped by competition. Competitions by event count desc; events by volume desc.
+      </Typography>
+      {grouped.map(({ name, events: evs }, idx) => (
+        <Accordion key={name} defaultExpanded={idx === 0}>
+          <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+            <Typography>
+              {name} ({evs.length})
+            </Typography>
+          </AccordionSummary>
+          <AccordionDetails>
+            <List dense disablePadding>
+              {evs.map((e) => (
+                <ListItem key={e.market_id} disablePadding>
+                  <ListItemButton onClick={() => onSelectEvent(e)}>
+                    <ListItemText
+                      primary={e.event_name || e.market_id}
+                      secondary={
+                        e.total_volume != null
+                          ? `Vol: ${Number(e.total_volume).toLocaleString()}`
+                          : undefined
+                      }
+                    />
+                  </ListItemButton>
+                </ListItem>
+              ))}
+            </List>
+          </AccordionDetails>
+        </Accordion>
+      ))}
+    </Box>
+  )
+}
+
 export function LeaguesAccordion({ 
   onSelectEvent, 
   onDateChange 
@@ -63,7 +136,6 @@ export function LeaguesAccordion({
   const [events, setEvents] = useState<EventItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [sortState, setSortState] = useState<SortState>(loadSortState)
   const [dataHorizon, setDataHorizon] = useState<{
     minDate: string
     hint: string
@@ -176,7 +248,7 @@ export function LeaguesAccordion({
           variant="outlined"
           size="small"
           onClick={() => {
-            const d = getYesterdayUTC()
+            const d = addDays(selectedDate, -1)
             if (!dataHorizon) {
               setSelectedDate(d)
               return
@@ -188,13 +260,25 @@ export function LeaguesAccordion({
             setSelectedDate(clamped)
           }}
         >
-          Yesterday
+          Previous day
         </Button>
-        <Button variant="outlined" size="small" onClick={() => setSelectedDate(getTodayUTC())}>
-          Today
-        </Button>
-        <Button variant="outlined" size="small" onClick={() => setSelectedDate(getTomorrowUTC())}>
-          Tomorrow
+        <Button
+          variant="outlined"
+          size="small"
+          onClick={() => {
+            const d = addDays(selectedDate, 1)
+            if (!dataHorizon) {
+              setSelectedDate(d)
+              return
+            }
+            const allowed = dataHorizon.allowedDays.size > 0 ? dataHorizon.allowedDays : null
+            const clamped = isDateAllowed(d, dataHorizon.minDate, allowed)
+              ? d
+              : nearestPreviousAllowedDate(d, dataHorizon.allowedDaysAsc, dataHorizon.minDate)
+            setSelectedDate(clamped)
+          }}
+        >
+          Next day
         </Button>
       </Box>
 
@@ -207,26 +291,11 @@ export function LeaguesAccordion({
       {loading ? (
         <Typography color="text.secondary">Loading…</Typography>
       ) : (
-        <>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
-            All events for {selectedDate} (UTC) with at least one snapshot. Row count = backend count. Missing H/A/D shown as —. Sort: H / A / D / Volume / Event Open Date; tie-breakers: volume desc, open date asc, market_id asc.
-          </Typography>
-          <SortedEventsList
-            events={events}
-            sortState={sortState}
-            onSortChange={setSortState}
-            onSelectEvent={(e: EventItem) => {
-              console.log('[LeaguesAccordion] Event selected', { 
-                market_id: e.market_id, 
-                event_name: e.event_name,
-                selectedDate,
-                latest_snapshot_at: e.latest_snapshot_at
-              })
-              onSelectEvent(e)
-            }}
-            showCalendarColumns
-          />
-        </>
+        <CompetitionAccordion
+          events={events}
+          selectedDate={selectedDate}
+          onSelectEvent={onSelectEvent}
+        />
       )}
     </Box>
   )
