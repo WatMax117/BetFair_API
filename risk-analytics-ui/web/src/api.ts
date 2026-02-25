@@ -32,6 +32,10 @@ export type EventItem = {
   event_name: string
   event_open_date: string | null
   competition_name: string | null
+  /** Country code (e.g. GB) for country-based sorting. */
+  country_code?: string | null
+  /** Betfair competition ID for stable accordion keys. */
+  competition_id?: string | null
   latest_snapshot_at: string | null
   home_best_back: number | null
   away_best_back: number | null
@@ -45,6 +49,8 @@ export type EventItem = {
   home_book_risk_l3?: number | null
   away_book_risk_l3?: number | null
   draw_book_risk_l3?: number | null
+  /** Impedance Index (15m), from medians. */
+  impedance_index_15m?: number | null
   /** Last stream tick time; null if no stream data. UI may mark row as stale when old. */
   last_stream_update_at?: string | null
   /** True when last_stream_update_at < now - 120 min; informational only, never excludes row. */
@@ -542,17 +548,67 @@ export async function fetchEventsByDateSnapshots(date: string): Promise<EventIte
     console.error('[api] fetchEventsByDateSnapshots json parse failed', e)
     throw new Error('Invalid JSON response')
   }
-  console.log('[api] fetchEventsByDateSnapshots parsed', { 
+  const arr = Array.isArray(parsed) ? parsed : []
+  if (arr.length > 0) {
+    const items = arr as EventItem[]
+    const withImp = items.filter((i) => i.impedance_index_15m != null).length
+    const withVol = items.filter((i) => i.total_volume != null).length
+    const withH = items.filter((i) => i.home_book_risk_l3 != null).length
+    console.log('[api] by-date-snapshots metrics diagnostic', {
+      total: items.length,
+      with_impedance_index_15m: withImp,
+      with_total_volume: withVol,
+      with_home_book_risk_l3: withH,
+    })
+  }
+  console.log('[api] fetchEventsByDateSnapshots parsed', {
     parsedType: typeof parsed,
-    isArray: Array.isArray(parsed), 
-    length: Array.isArray(parsed) ? parsed.length : null,
-    firstItemKeys: Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'object' && parsed[0] !== null ? Object.keys(parsed[0]) : null
+    isArray: Array.isArray(parsed),
+    length: arr.length,
+    firstItemKeys: arr.length > 0 && typeof arr[0] === 'object' && arr[0] !== null ? Object.keys(arr[0]) : null,
   })
   if (!Array.isArray(parsed)) {
     console.warn('[api] fetchEventsByDateSnapshots response is not an array', { type: typeof parsed })
     return []
   }
   return parsed as EventItem[]
+}
+
+/** Volume tab: event-level aggregate (SUM of market volumes). Same source as by-date-snapshots. */
+export type ByDateVolumeMarket = { market_id: string; market_name?: string | null; volume: number | null }
+export type ByDateVolumeItem = {
+  event_id: string
+  event_name: string
+  competition_name: string | null
+  competition_id?: string | null
+  event_open_date: string | null
+  volume_total: number
+  markets: ByDateVolumeMarket[]
+  latest_snapshot_at: string | null
+}
+export type ByDateVolumeResponse = {
+  date: string
+  timezone: string
+  sort: string
+  items: ByDateVolumeItem[]
+  paging: { limit: number; offset: number; total: number }
+}
+
+export async function fetchEventsByDateVolume(
+  date: string,
+  opts?: { limit?: number; offset?: number; min_volume?: number; sort?: string }
+): Promise<ByDateVolumeResponse> {
+  const apiBase = getApiBase()
+  const params = new URLSearchParams({ date: date.trim() })
+  if (opts?.limit != null) params.set('limit', String(opts.limit))
+  if (opts?.offset != null) params.set('offset', String(opts.offset))
+  if (opts?.min_volume != null && opts.min_volume > 0) params.set('min_volume', String(opts.min_volume))
+  if (opts?.sort) params.set('sort', opts.sort)
+  const url = `${apiBase}/events/by-date-volume?${params}`
+  const res = await fetch(url)
+  const raw = await res.text()
+  if (!res.ok) throw new Error(raw || res.statusText)
+  return JSON.parse(raw) as ByDateVolumeResponse
 }
 
 /** Debug: per-snapshot rows for a market (no raw_payload). Lazy-load when market selected. */

@@ -70,6 +70,14 @@ public class MarketChangeHandler {
         for (JsonNode mc : mcArray) {
             String marketId = mc.path("id").asText(null);
             if (marketId == null) continue;
+            // Diagnostic: log when receiving changes for known "missing" markets
+            if (marketId.equals("1.253811621") || marketId.equals("1.253822328") || marketId.equals("1.253822449")
+                    || marketId.equals("1.253821875") || marketId.equals("1.253821996")
+                    || marketId.equals("1.254084473") || marketId.equals("1.254085142") || marketId.equals("1.254083501") || marketId.equals("1.254084365")) {
+                JsonNode rc = mc.path("rc");
+                int rcCount = (rc != null && rc.isArray()) ? rc.size() : 0;
+                log.info("DIAG Received market change: marketId={}, rcCount={}", marketId, rcCount);
+            }
             if (metadataHydrator.isPresent() && metadataCache.isPresent()) {
                 if (!metadataCache.get().isResolved(marketId)) {
                     metadataHydrator.get().submit(marketId);

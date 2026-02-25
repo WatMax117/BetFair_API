@@ -10,6 +10,10 @@ spring:
   flyway:
     enabled: ${FLYWAY_ENABLED:true}
     locations: classpath:db/migration
+    # Separate migration user (schema owner): migrations run as SPRING_FLYWAY_USER; runtime uses datasource.
+    url: ${SPRING_FLYWAY_URL:${SPRING_DATASOURCE_URL}}
+    user: ${SPRING_FLYWAY_USER:}
+    password: ${SPRING_FLYWAY_PASSWORD:}
     # Baseline existing production schema (do not recreate objects)
     baseline-on-migrate: ${SPRING_FLYWAY_BASELINE_ON_MIGRATE:false}
     baseline-version: ${SPRING_FLYWAY_BASELINE_VERSION:1}
@@ -30,6 +34,12 @@ betfair:
   # market-ids: set via BETFAIR_MARKET_IDS (comma-separated) or leave empty for priority 40 events x 5 markets
   market-ids: []
   subscribe-from-db: ${BETFAIR_SUBSCRIBE_FROM_DB:true}
+  subscription-refresh-interval-minutes: ${BETFAIR_SUBSCRIPTION_REFRESH_INTERVAL_MINUTES:3}
+  # Max markets per subscription message (safety cap below Betfair ~200). Each batch sent on same connection.
+  subscription-batch-size: ${BETFAIR_SUBSCRIPTION_BATCH_SIZE:177}
+  # subscription-limit: 0 = subscribe to all eligible markets; >0 = reduced set (priority IDs included first)
+  subscription-limit: ${BETFAIR_SUBSCRIPTION_LIMIT:0}
+  subscription-priority-market-ids: ${BETFAIR_SUBSCRIPTION_PRIORITY_MARKET_IDS:}
   priority-subscription-enabled: ${BETFAIR_PRIORITY_SUBSCRIPTION_ENABLED:true}
   stream-duration-minutes: ${BETFAIR_STREAM_DURATION_MINUTES:0}
   reconnect-enabled: ${BETFAIR_RECONNECT_ENABLED:true}

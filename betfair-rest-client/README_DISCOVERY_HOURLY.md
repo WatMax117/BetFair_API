@@ -28,6 +28,21 @@ The stream client reads **active_markets_to_stream** (view over rest_markets, FT
 - **Kickoff postponed**: reschedules automatically (uses current `open_date` from rest_events; next run will use new kickoff).
 - **Event cancelled/closed** before follow-up: API returns empty; logged as not found; no retry.
 
+## Discovery mode (competition-driven, Variant B)
+
+- **Competitions list:** `listCompetitions` for Soccer; cached (default 12h TTL).
+- **Per-competition catalogue:** For each `competitionId`, calls `listMarketCatalogue` with:
+  - `competitionIds = [competitionId]`
+  - `marketTypeCodes = ["MATCH_ODDS", "OVER_UNDER_2_5", "NEXT_GOAL"]`
+  - `maxResults = 200`
+- No time-window; no inPlayOnly splitting. Single call per competition.
+- Deduplicate by `marketId` across competitions. If one competition fails, others continue.
+
+### Competition cache
+
+- **Path:** `DISCOVERY_COMPETITIONS_CACHE_PATH` (default: `discovery_competitions_cache.json` next to script).
+- **TTL:** `DISCOVERY_COMPETITIONS_CACHE_TTL_HOURS` (default: 12). Use 6–24 hours.
+
 ## Env (same as main REST client)
 
 - `BF_USERNAME` / `BETFAIR_USERNAME`

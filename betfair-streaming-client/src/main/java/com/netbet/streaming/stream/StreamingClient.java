@@ -98,8 +98,8 @@ public class StreamingClient {
     }
 
     /**
-     * On reconnection: send resubscribe payload(s) (same filters, optional initialClk/clk).
-     * Call only when already connected and writer is set (e.g. from a reconnection flow that reuses or re-establishes connection).
+     * Resubscribe with current market list (e.g. after DB refresh).
+     * Call only when connected. Thread-safe for use from subscription refresh scheduler.
      */
     public void sendResubscribe() {
         if (writer != null && running.get()) {
@@ -125,7 +125,7 @@ public class StreamingClient {
         }
     }
 
-    private void send(String json) {
+    private synchronized void send(String json) {
         if (writer != null) {
             writer.print(json);
             writer.print(CRLF);

@@ -33,7 +33,7 @@ cd /opt/netbet
 docker compose build --no-cache risk-analytics-ui-web
 docker compose up -d --no-deps risk-analytics-ui-web
 echo ""
-echo "Done. Check http://158.220.83.195/ (hard refresh: Ctrl+Shift+R)."
+echo "Done. Stream UI: http://158.220.83.195/stream (hard refresh: Ctrl+Shift+R)."
 '@
 $script | & ssh -i $KEY $VPS "bash -s"
 

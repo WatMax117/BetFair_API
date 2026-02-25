@@ -163,9 +163,15 @@ public class SubscriptionManager {
         if (batchedMarketIds != null && !batchedMarketIds.isEmpty()) {
             List<String> payloads = new java.util.ArrayList<>();
             int id = 2;
+            int batchIndex = 0;
             for (List<String> batch : batchedMarketIds) {
                 if (!batch.isEmpty()) {
+                    String first = batch.get(0);
+                    String last = batch.get(batch.size() - 1);
+                    log.info("Subscription batch {}: id={}, size={}, first={}, last={}",
+                            batchIndex + 1, id, batch.size(), first, last);
                     payloads.add(buildMarketSubscriptionPayloadForIds(id++, batch, null, null));
+                    batchIndex++;
                 }
             }
             lastSubscriptionId = id - 1;
@@ -190,9 +196,15 @@ public class SubscriptionManager {
         if (batchedMarketIds != null && !batchedMarketIds.isEmpty()) {
             List<String> payloads = new java.util.ArrayList<>();
             int id = 2;
+            int batchIndex = 0;
             for (List<String> batch : batchedMarketIds) {
                 if (!batch.isEmpty()) {
+                    String first = batch.get(0);
+                    String last = batch.get(batch.size() - 1);
+                    log.info("Resubscribe batch {}: id={}, size={}, first={}, last={}",
+                            batchIndex + 1, id, batch.size(), first, last);
                     payloads.add(buildMarketSubscriptionPayloadForIds(id++, batch, ic, c));
+                    batchIndex++;
                 }
             }
             return payloads;
@@ -216,5 +228,19 @@ public class SubscriptionManager {
 
     public int getLadderLevels() {
         return ladderLevels;
+    }
+
+    /** Current market IDs (flattened from batchedMarketIds). Used for change detection. */
+    public java.util.Set<String> getCurrentMarketIds() {
+        if (batchedMarketIds == null || batchedMarketIds.isEmpty()) {
+            return java.util.Set.of();
+        }
+        java.util.Set<String> set = new java.util.HashSet<>();
+        for (List<String> batch : batchedMarketIds) {
+            if (batch != null) {
+                set.addAll(batch);
+            }
+        }
+        return set;
     }
 }

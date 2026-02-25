@@ -186,11 +186,23 @@ public class PostgresStreamEventSink implements StreamEventSink {
         return count;
     }
 
+    private static final Set<String> DIAG_MARKET_IDS = Set.of(
+            "1.253811621", "1.253822328", "1.253822449",  // Serie A 2026-02-22
+            "1.253821875", "1.253821996",  // DIAG test 2026-02-23: Bologna/Udinese (control), Fiorentina/Pisa (suspect)
+            "1.254084473", "1.254085142", "1.254083501", "1.254084365");
+
     private void processSnapshot(SnapshotItem s, List<Object[]> ladderRows, List<Object[]> tradedRows, List<Object[]> liquidityRows) {
+        boolean diag = DIAG_MARKET_IDS.contains(s.marketId());
         MarketCache.CachedMarket market = marketCache.getMarket(s.marketId());
-        if (market == null) return;
-        String dbMarketType = resolveMarketType(market.getMarketDefinition());
-        if (dbMarketType == null || !ALLOWED_MARKET_TYPES.contains(dbMarketType)) return;
+        if (market == null) {
+            if (diag) log.info("DIAG processSnapshot: market null in cache for marketId={}", s.marketId());
+            return;
+        }
+        String dbMarketType = resolveMarketType(market.getMarketDefinition(), s.marketId(), diag);
+        if (dbMarketType == null || !ALLOWED_MARKET_TYPES.contains(dbMarketType)) {
+            if (diag) log.info("DIAG processSnapshot: skipped (type={}) for marketId={}", dbMarketType, s.marketId());
+            return;
+        }
 
         Instant publishTime = Instant.ofEpochMilli(s.publishTime());
         Instant receivedTime = Instant.ofEpochMilli(s.receivedAt());
@@ -255,13 +267,73 @@ public class PostgresStreamEventSink implements StreamEventSink {
                 tradedRows.add(new Object[]{s.marketId(), selectionId, e.getKey(), e.getValue(), publishTs, receivedTs});
             }
         }
+        if (diag && !ladderRows.isEmpty()) {
+            long count = ladderRows.stream().filter(r -> s.marketId().equals(r[0])).count();
+            log.info("DIAG Persisting ladder rows for marketId={}, count={}", s.marketId(), count);
+        }
     }
 
-    private String resolveMarketType(JsonNode marketDefinition) {
-        if (marketDefinition == null || marketDefinition.isMissingNode()) return null;
-        String raw = marketDefinition.path("marketType").asText(null);
-        if (raw == null || raw.isBlank()) return null;
-        return STREAM_TO_DB_MARKET_TYPE.getOrDefault(raw.trim().toUpperCase(), null);
+    /** Reason codes for DIAG typeResolution when resolved type is null. */
+    private static final String REASON_MISSING_DEFINITION = "MISSING_DEFINITION";
+    private static final String REASON_MISSING_FIELD = "MISSING_FIELD";
+    private static final String REASON_UNMAPPED_VALUE = "UNMAPPED_VALUE";
+    private static final String REASON_CACHE_PARTIAL = "CACHE_PARTIAL";
+    private static final String REASON_TRANSFORM_ERROR = "TRANSFORM_ERROR";
+
+    /**
+     * Resolves stream marketType to DB market type. When result is null and diag=true,
+     * logs a reason-coded DIAG line for diagnosis.
+     */
+    private String resolveMarketType(JsonNode marketDefinition, String marketId, boolean diag) {
+        boolean hasDefinition = marketDefinition != null && !marketDefinition.isMissingNode();
+        String incomingMarketTypeRaw = null;
+        String reasonCode;
+
+        if (!hasDefinition) {
+            reasonCode = REASON_MISSING_DEFINITION;
+        } else {
+            JsonNode marketTypeNode = marketDefinition.path("marketType");
+            if (marketTypeNode == null || marketTypeNode.isMissingNode()) {
+                incomingMarketTypeRaw = null;
+                reasonCode = REASON_CACHE_PARTIAL;  // field not present in definition
+            } else if (marketTypeNode.isNull()) {
+                incomingMarketTypeRaw = "null";
+                reasonCode = REASON_MISSING_FIELD;  // field present but null
+            } else {
+                String raw;
+                try {
+                    raw = marketTypeNode.asText(null);
+                } catch (Exception e) {
+                    incomingMarketTypeRaw = "(parse error: " + marketTypeNode + ")";
+                    reasonCode = REASON_TRANSFORM_ERROR;
+                    if (diag) {
+                        log.info("DIAG typeResolution: marketId={} hasDef=true incomingType={} resolvedType=null reason={}",
+                                marketId, incomingMarketTypeRaw, reasonCode);
+                    }
+                    return null;
+                }
+                if (raw == null || raw.isBlank()) {
+                    incomingMarketTypeRaw = raw != null ? "" : "null";
+                    reasonCode = REASON_MISSING_FIELD;
+                } else {
+                    String trimmed = raw.trim();
+                    incomingMarketTypeRaw = trimmed.isEmpty() ? "(blank)" : raw;
+                    if (trimmed.isEmpty()) {
+                        reasonCode = REASON_MISSING_FIELD;
+                    } else {
+                        String resolved = STREAM_TO_DB_MARKET_TYPE.get(trimmed.toUpperCase());
+                        if (resolved != null) return resolved;
+                        reasonCode = REASON_UNMAPPED_VALUE;
+                    }
+                }
+            }
+        }
+
+        if (diag) {
+            log.info("DIAG typeResolution: marketId={} hasDef={} incomingType={} resolvedType=null reason={}",
+                    marketId, hasDefinition, incomingMarketTypeRaw != null ? incomingMarketTypeRaw : "null", reasonCode);
+        }
+        return null;
     }
 
     private void addLifecycle(LifecycleItem l, List<Object[]> lifecycleRows) {

@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
 """
-REST discovery only (Soccer, Full-Time markets). Run on the hour at HH:00:17 (cron 0 * * * *; script sleeps 17s).
-- Calls Betfair listMarketCatalogue for Soccer with MATCH_ODDS, OVER_UNDER_2_5, NEXT_GOAL.
-- Excludes ALL Half-Time market types (HALF_TIME, HALF_TIME_SCORE, MATCH_ODDS_HT, etc.).
-- Persists ALL events and ALL relevant markets + runner/selection mapping.
-- Does NOT call listMarketBook; does NOT write any odds/snapshots. Metadata only.
+REST discovery only (Soccer, Full-Time markets). Run hourly at HH:00.
+- Competition-driven (Variant B): iterates per competition (league) via listCompetitions.
+- Market types: MATCH_ODDS, OVER_UNDER_2_5, NEXT_GOAL.
+- No time-window; no inPlayOnly splitting. Single catalogue call per competition.
+- If one competition fails, continues with others (no abort).
+- Persists events + markets to rest_events / rest_markets. Metadata only; no listMarketBook.
 - NEXT_GOAL follow-up: for events without NEXT_GOAL at kickoff, runs one REST check 117s after kickoff.
 """
+import json
 import logging
 import os
 import sys
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,15 +68,80 @@ def _get_attr(obj: Any, *keys: str):
     return None
 
 
-def _fetch_catalogue_ft(trading, from_ts, to_ts, market_type_codes: List[str], max_results: int = 1000):
+# Competition cache: file path and TTL (hours). Env: DISCOVERY_COMPETITIONS_CACHE_PATH, DISCOVERY_COMPETITIONS_CACHE_TTL_HOURS
+def _competitions_cache_path() -> Path:
+    p = os.environ.get("DISCOVERY_COMPETITIONS_CACHE_PATH")
+    if p:
+        return Path(p)
+    return Path(__file__).resolve().parent / "discovery_competitions_cache.json"
+
+
+def _competitions_cache_ttl_hours() -> float:
+    try:
+        return float(os.environ.get("DISCOVERY_COMPETITIONS_CACHE_TTL_HOURS", "12"))
+    except ValueError:
+        return 12.0
+
+
+def _get_competition_ids(trading) -> List[str]:
+    """
+    Get Soccer competition IDs. Uses file cache with TTL (default 12h).
+    On cache miss/expiry, calls listCompetitions and updates cache.
+    """
+    cache_path = _competitions_cache_path()
+    ttl_hours = _competitions_cache_ttl_hours()
+    now = datetime.now(timezone.utc)
+
+    if cache_path.exists():
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            cached_at_s = data.get("cached_at")
+            if cached_at_s:
+                cached_at = datetime.fromisoformat(cached_at_s.replace("Z", "+00:00"))
+                age_hours = (now - cached_at).total_seconds() / 3600
+                if age_hours < ttl_hours:
+                    ids = data.get("competition_ids") or []
+                    logger.info("Using cached competition list: %d competitions (cached %.1fh ago)", len(ids), age_hours)
+                    return ids
+        except Exception as e:
+            logger.warning("Competition cache read failed: %s, will refresh", e)
+
     from betfairlightweight import filters
-    time_range = filters.time_range(from_=from_ts, to=to_ts)
+    market_filter = filters.market_filter(event_type_ids=[1])
+    result = trading.betting.list_competitions(filter=market_filter)
+    rows = result if isinstance(result, list) else []
+    ids = []
+    for r in rows:
+        comp = _get_attr(r, "competition") or r
+        cid = _get_attr(comp, "id") or (comp.get("id") if isinstance(comp, dict) else None)
+        if cid:
+            ids.append(str(cid))
+    logger.info("Fetched %d competitions from listCompetitions", len(ids))
+
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump({"competition_ids": ids, "cached_at": now.isoformat()}, f, indent=0)
+    except Exception as e:
+        logger.warning("Competition cache write failed: %s", e)
+    return ids
+
+
+def _fetch_catalogue_for_competition(
+    trading, competition_id: str, market_type_codes: List[str], max_results: int = 200
+) -> List[Any]:
+    """
+    Call Betfair listMarketCatalogue for one competition with MATCH_ODDS, OVER_UNDER_2_5, NEXT_GOAL.
+    No time-window, no inPlayOnly. Returns list of catalogue items.
+    """
+    from betfairlightweight import filters
     market_filter = filters.market_filter(
         event_type_ids=[1],
+        competition_ids=[competition_id],
         market_type_codes=market_type_codes,
-        market_start_time=time_range,
     )
-    return trading.betting.list_market_catalogue(
+    result = trading.betting.list_market_catalogue(
         filter=market_filter,
         market_projection=[
             "RUNNER_DESCRIPTION",
@@ -86,6 +154,10 @@ def _fetch_catalogue_ft(trading, from_ts, to_ts, market_type_codes: List[str], m
         max_results=max_results,
         sort="MAXIMUM_TRADED",
     )
+    lst = result if isinstance(result, list) else []
+    if hasattr(result, "more_available") and result.more_available:
+        logger.warning("Betfair returned truncated results (more_available=True) for competition_id=%s", competition_id)
+    return list(lst)
 
 
 def _fetch_catalogue_for_event(trading, event_id: str, market_type_codes: List[str], max_results: int = 50):
@@ -134,8 +206,16 @@ def _ensure_tables(conn):
                 last_seen_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
         """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_rest_markets_event_id ON rest_markets(event_id);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_rest_markets_market_type ON rest_markets(market_type);")
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_rest_markets_event_id ON rest_markets(event_id);")
+        except Exception as e:
+            conn.rollback()
+            logger.debug("Index idx_rest_markets_event_id may already exist or permission denied: %s", e)
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_rest_markets_market_type ON rest_markets(market_type);")
+        except Exception as e:
+            conn.rollback()
+            logger.debug("Index idx_rest_markets_market_type may already exist or permission denied: %s", e)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS runners (
                 market_id    VARCHAR(32) NOT NULL,
@@ -158,17 +238,33 @@ def _ensure_tables(conn):
                 last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
         """)
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_mem_event_open_date ON market_event_metadata (event_open_date);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_mem_competition_name ON market_event_metadata (competition_name);")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_mem_market_start_time ON market_event_metadata (market_start_time);")
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_mem_event_open_date ON market_event_metadata (event_open_date);")
+        except Exception as e:
+            conn.rollback()
+            logger.debug("Index idx_mem_event_open_date may already exist or permission denied: %s", e)
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_mem_competition_name ON market_event_metadata (competition_name);")
+        except Exception as e:
+            conn.rollback()
+            logger.debug("Index idx_mem_competition_name may already exist or permission denied: %s", e)
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_mem_market_start_time ON market_event_metadata (market_start_time);")
+        except Exception as e:
+            conn.rollback()
+            logger.debug("Index idx_mem_market_start_time may already exist or permission denied: %s", e)
         # View: market_ids to stream (FT only; no HT). Source: rest_markets from REST discovery.
-        cur.execute("""
-            CREATE OR REPLACE VIEW active_markets_to_stream AS
-            SELECT market_id, event_id, market_type, market_name, market_start_time
-            FROM rest_markets
-            WHERE market_type IN ('MATCH_ODDS_FT', 'OVER_UNDER_25_FT', 'NEXT_GOAL')
-               OR (market_type LIKE 'OVER_UNDER_%%' AND market_type NOT LIKE '%%HT%%');
-        """)
+        try:
+            cur.execute("""
+                CREATE OR REPLACE VIEW active_markets_to_stream AS
+                SELECT market_id, event_id, market_type, market_name, market_start_time
+                FROM rest_markets
+                WHERE market_type IN ('MATCH_ODDS_FT', 'OVER_UNDER_25_FT', 'NEXT_GOAL')
+                   OR (market_type LIKE 'OVER_UNDER_%%' AND market_type NOT LIKE '%%HT%%');
+            """)
+        except Exception as e:
+            conn.rollback()
+            logger.debug("View active_markets_to_stream may already exist or permission denied: %s", e)
         # Track NEXT_GOAL follow-up attempts to avoid duplicates and support rescheduling on kickoff change.
         cur.execute("""
             CREATE TABLE IF NOT EXISTS next_goal_followup (
@@ -334,36 +430,175 @@ def _extract_metadata_row(catalogue_entry: Any) -> Optional[Dict]:
     }
 
 
-def run_discovery(trading, conn) -> Dict[str, int]:
-    """Fetch catalogue for FT types only, exclude HT, persist events + markets + runners + metadata. Returns counts."""
-    now = datetime.now(timezone.utc)
-    from_ts = now - timedelta(hours=2)
-    to_ts = now + timedelta(hours=48)
-    events_seen = set()
-    markets_stored = 0
-    events_stored = 0
+def _get_db_counts(conn) -> Tuple[int, int]:
+    """Return (rest_events count, rest_markets count)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM rest_events")
+        events_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM rest_markets")
+        markets_count = cur.fetchone()[0]
+    return events_count, markets_count
+
+
+def _run_db_coverage_checks(conn, today_str: str) -> None:
+    """
+    Step 3 & 4: Log DB coverage after discovery (distinct competitions today, markets today,
+    top competitions by market count, distinct market_ids for stream subscription).
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT COUNT(DISTINCT mem.competition_id)
+            FROM rest_events e
+            JOIN rest_markets m ON e.event_id = m.event_id
+            JOIN market_event_metadata mem ON m.market_id = mem.market_id
+            WHERE e.open_date::date = %s
+        """, (today_str,))
+        distinct_comps = cur.fetchone()[0]
+        cur.execute("""
+            SELECT COUNT(*)
+            FROM rest_markets m
+            JOIN rest_events e ON m.event_id = e.event_id
+            WHERE e.open_date::date = %s
+        """, (today_str,))
+        markets_today = cur.fetchone()[0]
+        cur.execute("""
+            SELECT mem.competition_id, mem.competition_name, COUNT(*) AS cnt
+            FROM rest_markets m
+            JOIN rest_events e ON m.event_id = e.event_id
+            JOIN market_event_metadata mem ON m.market_id = mem.market_id
+            WHERE e.open_date::date = %s
+            GROUP BY mem.competition_id, mem.competition_name
+            ORDER BY cnt DESC
+            LIMIT 20
+        """, (today_str,))
+        top_comps = cur.fetchall()
+        cur.execute("SELECT COUNT(DISTINCT market_id) FROM rest_markets")
+        distinct_market_ids = cur.fetchone()[0]
+    logger.info("[DIAG] db_coverage today=%s distinct_competitions=%d markets_today=%d distinct_market_ids_total=%d",
+                today_str, distinct_comps, markets_today, distinct_market_ids)
+    logger.info("[DIAG] top_20_competitions_by_markets_today: %s",
+                [(cid, cname, cnt) for cid, cname, cnt in top_comps])
+
+
+def run_discovery(trading, conn) -> Dict[str, Any]:
+    """
+    Competition-driven discovery: for each Soccer competition, fetch catalogue
+    (MATCH_ODDS, OVER_UNDER_2_5, NEXT_GOAL). Deduplicate by market_id. Persist events + markets.
+    """
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    logger.info("=== DISCOVERY DIAGNOSTICS START run_id=%s ===", run_id)
+    logger.info("Discovery mode: competition-driven (Variant B)")
+    logger.info("MarketTypeCodes: %s", MARKET_TYPE_CODES_FT)
+    logger.info("eventTypeIds: [1] (Soccer), maxResults: 200 per competition")
+
+    # Step 2: DB baseline before discovery
+    rest_events_before, rest_markets_before = _get_db_counts(conn)
+    logger.info("[DIAG] db_before rest_events=%d rest_markets=%d", rest_events_before, rest_markets_before)
+
+    competition_ids = _get_competition_ids(trading)
+    competitions_total = len(competition_ids)
+    competitions_succeeded = 0
+    competitions_failed = 0
+    competitions_returning_0 = 0
+    competitions_returning_gt0 = 0
+    catalogue_items_total = 0
+    competition_market_counts: List[Tuple[str, int]] = []  # (comp_id, count)
+    seen_market_id: Dict[str, Any] = {}  # market_id -> (catalogue_entry, stored_type)
     skipped_ht = 0
-    all_catalogues = []
-    for mkt_type in MARKET_TYPE_CODES_FT:
+    skipped_normalize = 0
+    dropped_samples: List[Dict] = []
+    max_results_per_comp = 200
+
+    logger.info("[DIAG] competitions_total=%d", competitions_total)
+    logger.info("[DIAG] first_20_competitionIds=%s", competition_ids[:20])
+
+    for comp_index, comp_id in enumerate(competition_ids, start=1):
+        call_started_at = datetime.now(timezone.utc)
+        logger.info("[DIAG] run_id=%s comp=%d/%d comp_id=%s catalogue_call=START",
+                    run_id, comp_index, competitions_total, comp_id)
         try:
-            result = _fetch_catalogue_ft(trading, from_ts, to_ts, [mkt_type], max_results=1000)
-            lst = result if isinstance(result, list) else []
+            lst = _fetch_catalogue_for_competition(trading, comp_id, MARKET_TYPE_CODES_FT, max_results=max_results_per_comp)
+            call_finished_at = datetime.now(timezone.utc)
+            returned_count = len(lst)
+            duration_ms = (call_finished_at - call_started_at).total_seconds() * 1000
+            logger.info("[DIAG] run_id=%s comp=%d/%d comp_id=%s catalogue_call=END returned_count=%d duration_ms=%.0f",
+                        run_id, comp_index, competitions_total, comp_id, returned_count, duration_ms)
+
+            # Per-competition market coverage
+            type_counts: Dict[str, int] = {}
+            for c in lst:
+                desc = _get_attr(c, "description", "market_description")
+                raw_type = _get_attr(desc, "marketType", "marketType") if desc else None
+                rt = (raw_type or "").strip()
+                type_counts[rt] = type_counts.get(rt, 0) + 1
+            logger.info("[DIAG] comp_id=%s returned_count=%d by_type=%s", comp_id, returned_count, type_counts)
+            if returned_count >= max_results_per_comp:
+                logger.warning("[DIAG] POTENTIAL_TRUNCATION for competitionId=%s (returned %d >= maxResults %d)", comp_id, returned_count, max_results_per_comp)
+
+            if returned_count == 0:
+                competitions_returning_0 += 1
+            else:
+                competitions_returning_gt0 += 1
+
+            comp_count = 0
             for c in lst:
                 desc = _get_attr(c, "description", "market_description")
                 raw_type = _get_attr(desc, "marketType", "marketType") if desc else None
                 raw_type = (raw_type or "").strip()
+                market_id = str(_get_attr(c, "marketId", "market_id") or "")
+                event = _get_attr(c, "event", "event")
+                event_id = _get_attr(event, "id") if event else None
+
                 if _is_ht_market_type(raw_type):
                     skipped_ht += 1
+                    if len(dropped_samples) < 10:
+                        dropped_samples.append({"market_id": market_id, "market_type": raw_type, "event_id": str(event_id) if event_id else None, "reason": "HT excluded"})
                     continue
                 norm = _normalise_market_type(raw_type)
                 if norm is None and not (raw_type.startswith("OVER_UNDER_") and "HT" not in raw_type.upper()):
+                    skipped_normalize += 1
+                    if len(dropped_samples) < 10:
+                        dropped_samples.append({"market_id": market_id, "market_type": raw_type, "event_id": str(event_id) if event_id else None, "reason": "normalize None"})
                     continue
-                all_catalogues.append((c, norm or raw_type))
+                if market_id and market_id not in seen_market_id:
+                    seen_market_id[market_id] = (c, norm or raw_type)
+                    comp_count += 1
+            catalogue_items_total += returned_count
+            competitions_succeeded += 1
+            if comp_count > 0:
+                competition_market_counts.append((comp_id, comp_count))
         except Exception as e:
-            logger.warning("Catalogue fetch for %s failed: %s", mkt_type, e)
+            competitions_failed += 1
+            logger.error("[DIAG] run_id=%s comp=%d/%d comp_id=%s catalogue_call=ERROR err=%s",
+                        run_id, comp_index, competitions_total, comp_id, str(e))
+
+    logger.info("[DIAG] catalogue_call END count=%d (succeeded=%d failed=%d)",
+                competitions_succeeded + competitions_failed, competitions_succeeded, competitions_failed)
+    logger.info("[DIAG] competitions_returning_0=%d competitions_returning_gt0=%d", competitions_returning_0, competitions_returning_gt0)
+
+    all_catalogues = list(seen_market_id.values())
+    events_seen: set = set()
+    markets_stored = 0
+    events_stored = 0
+    skipped_other = 0
+    markets_by_type: Dict[str, int] = {}
+    metadata_to_upsert = 0
+
+    logger.info("competitions_total=%d competitions_succeeded=%d competitions_failed=%d",
+                competitions_total, competitions_succeeded, competitions_failed)
+    logger.info("catalogue_items_total=%d unique_markets=%d", catalogue_items_total, len(all_catalogues))
+
+    # Step 3: Compare catalogue vs stored (coverage loss detection)
+    if catalogue_items_total > 0 and len(events_seen) > 0:
+        catalogue_to_events_ratio = catalogue_items_total / len(events_seen) if len(events_seen) else 0
+        if catalogue_items_total > 10 * len(events_seen):
+            logger.warning("[DIAG] NORMALIZATION_SUSPECT: catalogue_items_total=%d >> events_discovered=%d (ratio %.1f) -- check dropped reasons",
+                           catalogue_items_total, len(events_seen), catalogue_to_events_ratio)
+    
     for cat, stored_type in all_catalogues:
         market_id = str(_get_attr(cat, "marketId", "market_id") or "")
         if not market_id:
+            skipped_other += 1
             continue
         event = _get_attr(cat, "event", "event")
         event_id = _get_attr(event, "id") if event else None
@@ -383,7 +618,9 @@ def run_discovery(trading, conn) -> Dict[str, int]:
                 _upsert_event(conn, str(event_id), event_name, event_open_date, competition_name, home_team, away_team)
                 events_stored += 1
             except Exception as e:
-                logger.debug("Event upsert skip %s: %s", event_id, e)
+                conn.rollback()
+                logger.warning("Event upsert skip event_id=%s: %s", event_id, e)
+                skipped_other += 1
         market_name = None
         desc = _get_attr(cat, "description", "market_description")
         if desc:
@@ -391,21 +628,67 @@ def run_discovery(trading, conn) -> Dict[str, int]:
         market_start_time = _get_attr(cat, "marketStartTime", "market_start_time")
         try:
             _upsert_market(conn, market_id, str(event_id), stored_type, market_name, market_start_time)
-            _upsert_runners(conn, market_id, [r if isinstance(r, dict) else {"selectionId": getattr(r, "selectionId", None), "runnerName": getattr(r, "runnerName", None)} for r in runners_cat])
+            try:
+                _upsert_runners(conn, market_id, [r if isinstance(r, dict) else {"selectionId": getattr(r, "selectionId", None), "runnerName": getattr(r, "runnerName", None)} for r in runners_cat])
+            except Exception as re:
+                conn.rollback()
+                logger.debug("Runners upsert skip market_id=%s (e.g. FK to public.markets): %s", market_id, re)
             markets_stored += 1
+            markets_by_type[stored_type] = markets_by_type.get(stored_type, 0) + 1
         except Exception as e:
-            logger.debug("Market upsert skip %s: %s", market_id, e)
+            conn.rollback()
+            logger.warning("Market upsert skip market_id=%s: %s", market_id, e)
+            skipped_other += 1
         meta_row = _extract_metadata_row(cat)
         if meta_row:
+            metadata_to_upsert += 1
             try:
                 _upsert_metadata(conn, meta_row)
             except Exception as e:
-                logger.debug("Metadata upsert skip %s: %s", market_id, e)
+                conn.rollback()
+                logger.warning("Metadata upsert skip market_id=%s: %s", market_id, e)
+                skipped_other += 1
+
+    # Top 10 competitions by market count
+    competition_market_counts.sort(key=lambda x: x[1], reverse=True)
+    top10 = competition_market_counts[:10]
+
+    # Step 2: DB after discovery + deltas
+    rest_events_after, rest_markets_after = _get_db_counts(conn)
+    delta_events = rest_events_after - rest_events_before
+    delta_markets = rest_markets_after - rest_markets_before
+    logger.info("[DIAG] db_after rest_events=%d rest_markets=%d delta_events=%d delta_markets=%d",
+                rest_events_after, rest_markets_after, delta_events, delta_markets)
+
+    # Step 3 & 4: DB coverage checks (today UTC)
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    _run_db_coverage_checks(conn, today_str)
+
+    logger.info("=== DISCOVERY SUMMARY ===")
+    logger.info("[DIAG] competitions_total=%d competitions_succeeded=%d competitions_failed=%d competitions_returning_0=%d competitions_returning_gt0=%d",
+                competitions_total, competitions_succeeded, competitions_failed, competitions_returning_0, competitions_returning_gt0)
+    logger.info("[DIAG] catalogue_items_total=%d events_discovered=%d events_stored=%d markets_stored=%d",
+                catalogue_items_total, len(events_seen), events_stored, markets_stored)
+    logger.info("[DIAG] markets_stored_by_type: %s", markets_by_type)
+    logger.info("[DIAG] dropped_by_reason: HT=%d normalize=%d other=%d", skipped_ht, skipped_normalize, skipped_other)
+    logger.info("Top 10 competitions by market count: %s", [(cid, n) for cid, n in top10])
+    if dropped_samples:
+        logger.info("Sample dropped items (first %d): %s", len(dropped_samples),
+                    [(d["market_id"], d["market_type"], d["reason"]) for d in dropped_samples[:5]])
+    logger.info("=== DISCOVERY DIAGNOSTICS END ===")
+
     return {
+        "competitions_total": competitions_total,
+        "competitions_succeeded": competitions_succeeded,
+        "competitions_failed": competitions_failed,
+        "catalogue_items_total": catalogue_items_total,
         "events_discovered": len(events_seen),
         "events_stored": events_stored,
         "markets_stored": markets_stored,
+        "markets_by_type": markets_by_type,
         "skipped_ht": skipped_ht,
+        "skipped_normalize": skipped_normalize,
+        "skipped_other": skipped_other,
     }
 
 
@@ -566,13 +849,18 @@ def main() -> int:
     try:
         _ensure_tables(conn)
         counts = run_discovery(trading, conn)
-        logger.info("Discovery complete: events_discovered=%s events_stored=%s markets_stored=%s skipped_ht=%s",
-                    counts["events_discovered"], counts["events_stored"], counts["markets_stored"], counts["skipped_ht"])
+        logger.info("Discovery complete: competitions=%d/%d catalogue_items=%d events_discovered=%s events_stored=%s markets_stored=%s",
+                    counts["competitions_succeeded"], counts["competitions_total"], counts["catalogue_items_total"],
+                    counts["events_discovered"], counts["events_stored"], counts["markets_stored"])
+        conn.commit()  # Ensure discovery transaction is committed before follow-up
 
-        events_needing = _get_events_needing_next_goal_followup(conn)
-        if events_needing:
-            fu = run_next_goal_followups(trading, conn, events_needing)
-            logger.info("NEXT_GOAL follow-up: attempted=%s found=%s", fu["attempted"], fu["found"])
+        try:
+            events_needing = _get_events_needing_next_goal_followup(conn)
+            if events_needing:
+                fu = run_next_goal_followups(trading, conn, events_needing)
+                logger.info("NEXT_GOAL follow-up: attempted=%s found=%s", fu["attempted"], fu["found"])
+        except Exception as e:
+            logger.warning("NEXT_GOAL follow-up failed: %s", e)
     finally:
         conn.close()
     return 0

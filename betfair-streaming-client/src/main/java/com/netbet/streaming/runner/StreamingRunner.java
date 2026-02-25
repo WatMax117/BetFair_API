@@ -87,9 +87,11 @@ public class StreamingRunner implements CommandLineRunner {
                     marketIds = priorityMarketResolver.resolvePriorityMarketIds(token);
                 }
                 if (!marketIds.isEmpty()) {
-                    var batches = ActiveMarketsFromDb.batch(marketIds, ActiveMarketsFromDb.MAX_MARKET_IDS_PER_SUBSCRIPTION);
+                    int batchSize = activeMarketsFromDb.getSubscriptionBatchSize();
+                    var batches = ActiveMarketsFromDb.batch(marketIds, batchSize);
                     subscriptionManager.setBatchedMarketIds(batches);
-                    log.info("Subscribing to {} markets ({} batches, FT only)", marketIds.size(), batches.size());
+                    log.info("Subscribing to {} markets in {} batches (max {} per batch, FT only)",
+                            marketIds.size(), batches.size(), batchSize);
                 }
                 streamingClient.run(token);
             } catch (SessionProvider.SessionException e) {

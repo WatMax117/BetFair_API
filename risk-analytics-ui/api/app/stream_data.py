@@ -7,10 +7,13 @@ Staleness: markets with no update in the last N minutes are excluded (see STALE_
 Bucket parameters: time-weighted medians of back_odds and back_size per 15-min UTC bucket.
 Uses carry-forward logic: baseline from before bucket_start, then segments for updates in bucket.
 """
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from app.db import cursor
+
+logger = logging.getLogger(__name__)
 
 # No update in last N minutes (UTC) -> exclude market from bucket. Configurable.
 # Temporarily 120 for diagnostics; reduce to 20 once streaming freshness is confirmed.
@@ -577,6 +580,7 @@ def get_events_by_date_rest_driven(date_str: str) -> List[Dict[str, Any]]:
     stale_cutoff = now - timedelta(minutes=STALE_MINUTES)
 
     # 1. Primary: rest_events + rest_markets, filtered by date and market type
+    # Uses UTC boundaries: [from_dt, to_dt). No filter by ladder/snapshot - REST defines list.
     with cursor() as cur:
         cur.execute(
             """
@@ -592,6 +596,10 @@ def get_events_by_date_rest_driven(date_str: str) -> List[Dict[str, Any]]:
             (from_dt, to_dt),
         )
         primary_rows = cur.fetchall()
+    logger.info(
+        "by_date_rest_driven date=%s from_dt=%s to_dt=%s primary_rows=%d",
+        date_str, from_dt, to_dt, len(primary_rows),
+    )
 
     # 2. Batch-fetch metadata (LEFT JOIN semantics: may be missing)
     market_ids = [r["market_id"] for r in primary_rows]
@@ -601,6 +609,7 @@ def get_events_by_date_rest_driven(date_str: str) -> List[Dict[str, Any]]:
             cur.execute(
                 """
                 SELECT market_id, event_name, event_open_date, competition_name,
+                       country_code, competition_id,
                        home_selection_id, away_selection_id, draw_selection_id
                 FROM market_event_metadata
                 WHERE market_id = ANY(%s)
@@ -625,6 +634,29 @@ def get_events_by_date_rest_driven(date_str: str) -> List[Dict[str, Any]]:
             )
             for row in cur.fetchall():
                 last_stream_by_market[row["market_id"]] = row["last_pt"] if row.get("last_pt") else None
+        logger.info(
+            "by_date_rest_driven date=%s markets_requested=%d markets_with_ladder=%d",
+            date_str, len(market_ids), len(last_stream_by_market),
+        )
+
+    # 4. Batch-fetch latest total_matched from liquidity (for markets with liquidity but no ladder → show volume)
+    liquidity_volume_by_market: Dict[str, Optional[float]] = {}
+    if market_ids:
+        with cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (market_id) market_id, total_matched
+                FROM stream_ingest.market_liquidity_history
+                WHERE market_id = ANY(%s) AND publish_time >= %s AND publish_time <= %s
+                ORDER BY market_id, publish_time DESC
+                """,
+                (market_ids, from_dt, effective_end),
+            )
+            for row in cur.fetchall():
+                v = row.get("total_matched")
+                liquidity_volume_by_market[row["market_id"]] = (
+                    float(v) if v is not None else None
+                )
 
     result: List[Dict[str, Any]] = []
     for m in primary_rows:
@@ -645,6 +677,8 @@ def get_events_by_date_rest_driven(date_str: str) -> List[Dict[str, Any]]:
         )
         event_open_date = meta.get("event_open_date") if meta else m.get("event_open_date")
         competition_name = (meta.get("competition_name") if meta else None) or m.get("competition_name")
+        country_code = meta.get("country_code") if meta else None
+        competition_id = meta.get("competition_id") if meta else None
 
         home_sid = meta.get("home_selection_id") if meta else None
         away_sid = meta.get("away_selection_id") if meta else None
@@ -689,6 +723,9 @@ def get_events_by_date_rest_driven(date_str: str) -> List[Dict[str, Any]]:
                 _, home_bb, away_bb, draw_bb, home_bl, away_bl, draw_bl, total_volume = _runners_from_ladder(
                     cur, market_id, latest_bucket, home_sid, away_sid, draw_sid,
                 )
+        # Fallback: show volume from liquidity when we have liquidity but no ladder
+        if total_volume is None and market_id in liquidity_volume_by_market:
+            total_volume = liquidity_volume_by_market[market_id]
 
         result.append({
             "market_id": market_id,
@@ -696,6 +733,8 @@ def get_events_by_date_rest_driven(date_str: str) -> List[Dict[str, Any]]:
             "event_name": event_name,
             "event_open_date": event_open_date.isoformat() if event_open_date else None,
             "competition_name": competition_name,
+            "country_code": country_code,
+            "competition_id": str(competition_id) if competition_id else None,
             "latest_snapshot_at": latest_bucket.isoformat(),
             "home_best_back": home_bb,
             "away_best_back": away_bb,
@@ -724,6 +763,78 @@ def get_events_by_date_rest_driven(date_str: str) -> List[Dict[str, Any]]:
         })
 
     return result
+
+
+def get_events_by_date_volume(
+    date_str: str,
+    limit: int = 100,
+    offset: int = 0,
+    min_volume: float = 0.0,
+    sort: str = "volume_desc",
+) -> Dict[str, Any]:
+    """
+    Events for the selected day aggregated by volume for the Volume tab.
+    Event volume = SUM(total_volume) over all markets linked to that event in the day's dataset.
+    Same data source as by-date-snapshots (REST + stream enrichment). volume=null treated as 0 for
+    ranking; no theoretical latest_snapshot_at (return null).
+    """
+    try:
+        from_dt = datetime.strptime(date_str.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return {
+            "date": date_str.strip(),
+            "timezone": "UTC",
+            "sort": sort,
+            "items": [],
+            "paging": {"limit": limit, "offset": offset, "total": 0},
+        }
+
+    market_rows = get_events_by_date_rest_driven(date_str)
+    # Group by event_id (string for stable key)
+    by_event: Dict[str, Dict[str, Any]] = {}
+    for m in market_rows:
+        eid = str(m.get("event_id") or "")
+        vol = m.get("total_volume")
+        vol_num = float(vol) if vol is not None and not isinstance(vol, (str, bool)) else 0.0
+        if eid not in by_event:
+            by_event[eid] = {
+                "event_id": eid,
+                "event_name": m.get("event_name") or "Unknown",
+                "competition_name": m.get("competition_name"),
+                "competition_id": m.get("competition_id"),
+                "event_open_date": m.get("event_open_date"),
+                "volume_total": 0.0,
+                "markets": [],
+            }
+        by_event[eid]["volume_total"] += vol_num
+        by_event[eid]["markets"].append({
+            "market_id": m.get("market_id"),
+            "market_name": m.get("market_name"),
+            "volume": vol if vol is not None else None,
+        })
+
+    items = list(by_event.values())
+    # Filter: min_volume (events with volume_total < min_volume excluded)
+    if min_volume > 0:
+        items = [e for e in items if (e["volume_total"] or 0) >= min_volume]
+    total = len(items)
+    # Sort: volume_desc (default) or volume_asc; null/0 at end for desc, at start for asc
+    reverse = sort != "volume_asc"
+    items.sort(key=lambda e: (e["volume_total"] or 0), reverse=reverse)
+    # Paginate
+    items = items[offset : offset + limit]
+
+    # Do not emit theoretical latest_snapshot_at (per spec)
+    for e in items:
+        e["latest_snapshot_at"] = None
+
+    return {
+        "date": date_str.strip(),
+        "timezone": "UTC",
+        "sort": sort,
+        "items": items,
+        "paging": {"limit": limit, "offset": offset, "total": total},
+    }
 
 
 def get_events_by_date_snapshots_stream(date_str: str) -> List[Dict[str, Any]]:

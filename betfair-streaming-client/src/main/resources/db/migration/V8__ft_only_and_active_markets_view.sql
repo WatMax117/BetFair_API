@@ -1,11 +1,6 @@
--- V8: Full-Time only; no Half-Time. View for stream subscription from REST discovery.
+-- V8: View for stream subscription from REST discovery.
 -- REST discovery (discovery_hourly.py) populates rest_events, rest_markets; stream client reads active_markets_to_stream.
-
-ALTER TABLE public.markets DROP CONSTRAINT IF EXISTS chk_market_type;
-
-ALTER TABLE public.markets ADD CONSTRAINT chk_market_type CHECK (market_type IN (
-    'MATCH_ODDS_FT', 'OVER_UNDER_25_FT', 'NEXT_GOAL'
-));
+-- chk_market_type stays 5-type (V6): MATCH_ODDS_FT, OVER_UNDER_25_FT, OVER_UNDER_05_HT, MATCH_ODDS_HT, NEXT_GOAL.
 
 -- Tables for REST discovery (metadata only). Created here so view exists before first REST run.
 CREATE TABLE IF NOT EXISTS public.rest_events (

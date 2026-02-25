@@ -98,16 +98,24 @@ export function EventDetail({
   const [lastRequestInfo, setLastRequestInfo] = useState<{ buckets?: string; ticks?: { from_ts: string; to_ts: string } }>({})
   const [bucketListVisible, setBucketListVisible] = useState(50)
 
+  // Reset state when marketId changes so we never show stale data from a previous event
   useEffect(() => {
-    console.log('[EventDetail] Loading meta for marketId', { marketId })
+    setMeta(null)
+    setBuckets([])
+    setSelectedBucket(null)
+    setTicks([])
+  }, [marketId])
+
+  useEffect(() => {
+    console.log('[EventDetail] fetch meta request', { marketId })
     setLoadingMeta(true)
     fetchEventMeta(marketId)
       .then((meta: EventMeta) => {
-        console.log('[EventDetail] Meta received', { meta })
+        console.log('[EventDetail] fetch meta response', { marketId, status: 'ok', eventName: meta.event_name })
         setMeta(meta)
       })
       .catch((e: unknown) => {
-        console.error('[EventDetail] Meta load error', e)
+        console.error('[EventDetail] fetch meta error', { marketId, error: e })
         setMeta(null)
       })
       .finally(() => setLoadingMeta(false))
@@ -117,13 +125,15 @@ export function EventDetail({
     const apiBase = getApiBase()
     const bucketsUrl = `${apiBase}/events/${encodeURIComponent(marketId)}/buckets?event_aware=true`
     setLastRequestInfo((prev) => ({ ...prev, buckets: bucketsUrl }))
+    console.log('[EventDetail] fetch buckets request', { marketId })
     setLoadingBuckets(true)
     fetchEventBuckets(marketId, undefined, undefined, true)
       .then((data: BucketItem[]) => {
+        console.log('[EventDetail] fetch buckets response', { marketId, status: 'ok', count: data.length })
         setBuckets(data)
       })
       .catch((e: unknown) => {
-        console.error('[EventDetail] Buckets load error', e)
+        console.error('[EventDetail] fetch buckets error', { marketId, error: e })
         setBuckets([])
       })
       .finally(() => setLoadingBuckets(false))
@@ -143,19 +153,16 @@ export function EventDetail({
     const bucketStart = new Date(selectedBucket)
     const bucketEnd = new Date(bucketStart.getTime() + 15 * 60 * 1000) // +15 minutes
     
-    console.log('[EventDetail] Loading ticks', { 
-      marketId, 
-      bucketStart: bucketStart.toISOString(), 
-      bucketEnd: bucketEnd.toISOString() 
-    })
+    console.log('[EventDetail] fetch ticks request', { marketId, bucketStart: bucketStart.toISOString() })
     setLastRequestInfo((prev) => ({ ...prev, ticks: { from_ts: bucketStart.toISOString(), to_ts: bucketEnd.toISOString() } }))
     setLoadingTicks(true)
     fetchMarketTicks(marketId, bucketStart, bucketEnd, 2000)
       .then((data: TickRow[]) => {
+        console.log('[EventDetail] fetch ticks response', { marketId, status: 'ok', count: data.length })
         setTicks(data)
       })
       .catch((e: unknown) => {
-        console.error('[EventDetail] Ticks load error', e)
+        console.error('[EventDetail] fetch ticks error', { marketId, error: e })
         setTicks([])
       })
       .finally(() => setLoadingTicks(false))
@@ -175,21 +182,31 @@ export function EventDetail({
     }
   }, [buckets, selectedBucket])
 
-  const chartData = buckets.map((p) => ({
-    time: p.bucket_start
-      ? (useUtc
-          ? new Date(p.bucket_start).toLocaleTimeString('en-GB', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' })
-          : new Date(p.bucket_start).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }))
-      : '',
-    fullTime: p.bucket_start,
-    home_back: p.home_best_back ?? null,
-    away_back: p.away_best_back ?? null,
-    draw_back: p.draw_best_back ?? null,
-    total_volume: p.total_volume ?? null,
-    home_book_risk_l3: p.home_book_risk_l3 ?? null,
-    away_book_risk_l3: p.away_book_risk_l3 ?? null,
-    draw_book_risk_l3: p.draw_book_risk_l3 ?? null,
-  }))
+  const volumeValues = buckets.map((p) => p.total_volume ?? 0).filter((v) => v > 0)
+  const volMin = volumeValues.length > 0 ? Math.min(...volumeValues) : 0
+  const volMax = volumeValues.length > 0 ? Math.max(...volumeValues) : 1
+  const volRange = volMax - volMin || 1
+
+  const chartData = buckets.map((p) => {
+    const vol = p.total_volume ?? null
+    const volNorm = vol != null ? (vol - volMin) / volRange : null
+    return {
+      time: p.bucket_start
+        ? (useUtc
+            ? new Date(p.bucket_start).toLocaleTimeString('en-GB', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' })
+            : new Date(p.bucket_start).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }))
+        : '',
+      fullTime: p.bucket_start,
+      home_back: p.home_best_back ?? null,
+      away_back: p.away_best_back ?? null,
+      draw_back: p.draw_best_back ?? null,
+      total_volume: vol,
+      volume_normalized: volNorm,
+      home_book_risk_l3: p.home_book_risk_l3 ?? null,
+      away_book_risk_l3: p.away_book_risk_l3 ?? null,
+      draw_book_risk_l3: p.draw_book_risk_l3 ?? null,
+    }
+  })
   const hasBookRiskL3 = buckets.some((p) => p.home_book_risk_l3 != null || p.away_book_risk_l3 != null || p.draw_book_risk_l3 != null)
 
   // Find selected bucket data
@@ -362,17 +379,19 @@ export function EventDetail({
               {/* Chart 1: Risk (Book Risk L3) */}
               {hasBookRiskL3 && (
                 <Paper sx={{ p: 1, mb: 2, height: 280 }}>
-                  <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>Risk (Book Risk L3 H/A/D)</Typography>
+                  <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>Risk (Book Risk L3 H/A/D) + Volume (normalized)</Typography>
                   <ResponsiveContainer width="100%" height={240}>
-                    <LineChart data={chartData} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                    <LineChart data={chartData} margin={{ top: 5, right: 50, left: 10, bottom: 5 }}>
                       <CartesianGrid strokeDasharray="3 3" />
                       <XAxis dataKey="time" />
-                      <YAxis />
+                      <YAxis yAxisId="risk" />
+                      <YAxis yAxisId="volume" orientation="right" domain={[0, 1]} hide />
                       <RechartsTooltip />
                       <Legend />
-                      <Line type="monotone" dataKey="home_book_risk_l3" name="Home" stroke="#1976d2" dot={false} />
-                      <Line type="monotone" dataKey="away_book_risk_l3" name="Away" stroke="#9c27b0" dot={false} />
-                      <Line type="monotone" dataKey="draw_book_risk_l3" name="Draw" stroke="#2e7d32" dot={false} />
+                      <Line type="monotone" dataKey="home_book_risk_l3" name="Home" stroke="#1976d2" dot={false} yAxisId="risk" />
+                      <Line type="monotone" dataKey="away_book_risk_l3" name="Away" stroke="#9c27b0" dot={false} yAxisId="risk" />
+                      <Line type="monotone" dataKey="draw_book_risk_l3" name="Draw" stroke="#2e7d32" dot={false} yAxisId="risk" />
+                      <Line type="monotone" dataKey="volume_normalized" name="Volume (normalized)" stroke="#ed6c02" dot={false} yAxisId="volume" connectNulls />
                     </LineChart>
                   </ResponsiveContainer>
                 </Paper>

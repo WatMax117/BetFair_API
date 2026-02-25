@@ -13,6 +13,7 @@ from app.db import cursor
 logger = logging.getLogger(__name__)
 from app.stream_data import (
     get_events_by_date_rest_driven,
+    get_events_by_date_volume,
     get_event_timeseries_stream,
     get_event_buckets_stream_bulk,
     get_event_buckets_stream,
@@ -70,7 +71,27 @@ def stream_events_by_date_snapshots(
     Returns last_stream_update_at, is_stale for UI to mark stale rows.
     """
     events = get_events_by_date_rest_driven(date)
+    logger.info("by_date_snapshots date=%s returned_count=%d", date, len(events))
     return events
+
+
+@stream_router.get("/events/by-date-volume")
+def stream_events_by_date_volume(
+    date: str = Query(..., description="UTC date YYYY-MM-DD"),
+    limit: int = Query(100, ge=1, le=500, description="Max events to return"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
+    min_volume: float = Query(0.0, ge=0, description="Exclude events with volume_total < this"),
+    sort: str = Query("volume_desc", description="volume_desc or volume_asc"),
+):
+    """
+    Volume tab: events for the selected day ordered by traded volume (SUM of market volumes per event).
+    Same data source as by-date-snapshots. No theoretical timestamps.
+    """
+    if sort not in ("volume_desc", "volume_asc"):
+        sort = "volume_desc"
+    result = get_events_by_date_volume(date, limit=limit, offset=offset, min_volume=min_volume, sort=sort)
+    logger.info("by_date_volume date=%s total=%d returned=%d", date, result["paging"]["total"], len(result["items"]))
+    return result
 
 
 # Default bucket window: last 180 minutes (12 buckets)

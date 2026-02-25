@@ -175,6 +175,10 @@ def run_provisioning() -> Tuple[bool, List[str], Optional[float]]:
                     )
                 )
                 created.append(part_name)
+                # Ensure API reader can see new partition (parent GRANT does not cascade in PostgreSQL)
+                cur.execute(
+                    sql.SQL("GRANT SELECT ON {} TO netbet_analytics_reader").format(part_ident)
+                )
                 current += timedelta(days=1)
 
             conn.commit()
