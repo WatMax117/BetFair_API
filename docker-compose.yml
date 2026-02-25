@@ -62,6 +62,15 @@ services:
       - SPRING_DATASOURCE_USERNAME=${POSTGRES_STREAM_WRITER_USER:-netbet_stream_writer}
       - SPRING_DATASOURCE_PASSWORD=${POSTGRES_STREAM_WRITER_PASSWORD}
       - BETFAIR_POSTGRES_SINK_ENABLED=${BETFAIR_POSTGRES_SINK_ENABLED:-true}
+      # Subscribe to all eligible markets when limit=0; batch size 177 per subscription message (safety cap)
+      - BETFAIR_SUBSCRIPTION_BATCH_SIZE=${BETFAIR_SUBSCRIPTION_BATCH_SIZE:-177}
+      - BETFAIR_SUBSCRIPTION_LIMIT=${BETFAIR_SUBSCRIPTION_LIMIT:-0}
+      - BETFAIR_MARKET_IDS=${BETFAIR_MARKET_IDS:-}
+      - BETFAIR_SUBSCRIPTION_PRIORITY_MARKET_IDS=${BETFAIR_SUBSCRIPTION_PRIORITY_MARKET_IDS:-}
+      # Flyway runs as schema owner (netbet); runtime uses netbet_stream_writer
+      - SPRING_FLYWAY_URL=jdbc:postgresql://netbet-postgres:5432/${POSTGRES_DB:-netbet}
+      - SPRING_FLYWAY_USER=${POSTGRES_USER:-netbet}
+      - SPRING_FLYWAY_PASSWORD=${POSTGRES_PASSWORD:-netbet}
       # Flyway baseline for existing stream_ingest schema (production): do not run V1–V5
       - SPRING_FLYWAY_BASELINE_ON_MIGRATE=${SPRING_FLYWAY_BASELINE_ON_MIGRATE:-true}
       - SPRING_FLYWAY_BASELINE_VERSION=${SPRING_FLYWAY_BASELINE_VERSION:-5}
@@ -94,15 +103,10 @@ services:
       - POSTGRES_USER=${POSTGRES_REST_WRITER_USER:-netbet_rest_writer}
       - POSTGRES_PASSWORD=${POSTGRES_REST_WRITER_PASSWORD}
       - PGOPTIONS=-c search_path=public
-      # Sticky pre-match K=200 (set in .env or use defaults)
-      - BF_STICKY_PREMATCH=${BF_STICKY_PREMATCH:-1}
-      - BF_STICKY_K=${BF_STICKY_K:-200}
-      - BF_STICKY_CATALOGUE_MAX=${BF_STICKY_CATALOGUE_MAX:-400}
-      - BF_KICKOFF_BUFFER_SECONDS=${BF_KICKOFF_BUFFER_SECONDS:-60}
-      - BF_STICKY_NEAR_KICKOFF_HOURS=${BF_STICKY_NEAR_KICKOFF_HOURS:-2}
-      - BF_STICKY_NEAR_KICKOFF_CONSECUTIVE_TICKS=${BF_STICKY_NEAR_KICKOFF_CONSECUTIVE_TICKS:-1}
+      # Tracked set from discovery_time_window + selector (no sticky/catalogue)
       - BF_MARKET_BOOK_BATCH_SIZE=${BF_MARKET_BOOK_BATCH_SIZE:-50}
       - BF_INTERVAL_SECONDS=${BF_INTERVAL_SECONDS:-900}
+      - DISCOVERY_STALE_WARNING_MINUTES=${DISCOVERY_STALE_WARNING_MINUTES:-45}
     volumes:
       - /opt/netbet/auth-service/certs:/app/certs:ro
       - betfair-rest-client-data:/app/data

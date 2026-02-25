@@ -43,19 +43,10 @@ POSTGRES_DB = os.environ.get("POSTGRES_DB", "netbet")
 POSTGRES_USER = os.environ.get("POSTGRES_USER", "netbet")
 POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "")
 
-# Sticky pre-match tracking (BF_STICKY_PREMATCH=1) — target 200 matches
-STICKY_PREMATCH = os.environ.get("BF_STICKY_PREMATCH", "").lower() in ("1", "true", "yes")
-STICKY_K = int(os.environ.get("BF_STICKY_K", "200"))
-STICKY_KICKOFF_BUFFER_SECONDS = int(os.environ.get("BF_KICKOFF_BUFFER_SECONDS", "60"))
-STICKY_V_MIN = float(os.environ.get("BF_STICKY_V_MIN", "0"))
-STICKY_T_MIN_HOURS = float(os.environ.get("BF_STICKY_T_MIN_HOURS", "0"))
-STICKY_T_MAX_HOURS = float(os.environ.get("BF_STICKY_T_MAX_HOURS", "24"))
-STICKY_REQUIRE_CONSECUTIVE_TICKS = int(os.environ.get("BF_STICKY_REQUIRE_CONSECUTIVE_TICKS", "2"))
-# Relax maturity for near-kickoff: require 1 tick when kickoff within this many hours (else STICKY_REQUIRE_CONSECUTIVE_TICKS)
-STICKY_NEAR_KICKOFF_HOURS = float(os.environ.get("BF_STICKY_NEAR_KICKOFF_HOURS", "2"))
-STICKY_NEAR_KICKOFF_CONSECUTIVE_TICKS = int(os.environ.get("BF_STICKY_NEAR_KICKOFF_CONSECUTIVE_TICKS", "1"))
-STICKY_CATALOGUE_MAX = int(os.environ.get("BF_STICKY_CATALOGUE_MAX", "400"))
 MARKET_BOOK_BATCH_SIZE = int(os.environ.get("BF_MARKET_BOOK_BATCH_SIZE", "50"))
+
+# Discovery staleness check (daemon warns if discovery hasn't run recently)
+DISCOVERY_STALE_WARNING_MINUTES = int(os.environ.get("DISCOVERY_STALE_WARNING_MINUTES", "45"))
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -665,174 +656,10 @@ def _runner_metadata_from_catalogue(catalogue_entry: Any) -> Optional[Dict]:
     return metadata if len(metadata) == 3 else None
 
 
-def _tick(trading) -> bool:
-    global _tick_id
-    _tick_id += 1
-    tick_id = _tick_id
-    start_ts = time.monotonic()
-    _touch_heartbeat_alive()
-
-    if not _ensure_session(trading):
-        return False
-
-    # Fetch catalogue
-    try:
-        success, result = _run_with_backoff(_fetch_catalogue, trading, start_ts)
-    except Exception as session_err:
-        logger.warning("Session error, re-login and retry once: %s", session_err)
-        if not _ensure_session(trading):
-            return False
-        success, result = _run_with_backoff(_fetch_catalogue, trading, start_ts)
-
-    if not success or result is None:
-        logger.error("listMarketCatalogue failed (non-fatal).")
-        return False
-
-    catalogues = result if isinstance(result, list) else []
-    if not catalogues:
-        logger.warning("listMarketCatalogue returned no markets.")
-        _touch_heartbeat_success()
-        duration_ms = int((time.monotonic() - start_ts) * 1000)
-        logger.info(
-            "tick_id=%s duration_ms=%s markets_count=0",
-            tick_id, duration_ms,
-        )
-        return True
-
-    # Only 3-way markets (e.g. Match Odds); exclude 2-way (Draw No Bet, Tennis, etc.)
-    def _runner_count(m):
-        rc = m.get("runnerCount") if isinstance(m, dict) else getattr(m, "runnerCount", None) or getattr(m, "runner_count", None)
-        if rc is not None:
-            return int(rc) if str(rc).isdigit() else len(m.get("runners") or getattr(m, "runners", None) or [])
-        return len(m.get("runners") or getattr(m, "runners", None) or [])
-    catalogues = [c for c in catalogues if _runner_count(c) == 3]
-    if not catalogues:
-        logger.warning("No markets with exactly 3 runners (filtered out 2-way markets).")
-        _touch_heartbeat_success()
-        duration_ms = int((time.monotonic() - start_ts) * 1000)
-        logger.info("tick_id=%s duration_ms=%s markets_count=0", tick_id, duration_ms)
-        return True
-
-    # 3-layer flow: upsert metadata for top N, then fetch books, then insert raw + derived per market.
-    if not POSTGRES_PASSWORD:
-        logger.warning("POSTGRES_PASSWORD not set; skipping 3-layer persistence.")
-        _touch_heartbeat_success()
-        return True
-
-    snapshot_at = datetime.now(timezone.utc)
-    market_ids = []
-    try:
-        conn = _get_conn()
-        _ensure_three_layer_tables(conn)
-        for m in catalogues[:MARKET_BOOK_TOP_N]:
-            meta_row = _extract_metadata_row(m)
-            if meta_row is None:
-                continue
-            _upsert_metadata(conn, meta_row)
-            market_ids.append(meta_row["market_id"])
-        conn.close()
-    except Exception as e:
-        logger.warning("Metadata upsert failed: %s", e)
-        _touch_heartbeat_success()
-        return True
-
-    if not market_ids:
-        logger.warning("No markets with complete metadata mapping (HOME/AWAY/DRAW).")
-        _touch_heartbeat_success()
-        duration_ms = int((time.monotonic() - start_ts) * 1000)
-        logger.info("tick_id=%s duration_ms=%s markets_count=0", tick_id, duration_ms)
-        return True
-
-    if _past_deadline(start_ts):
-        logger.warning("Tick deadline exceeded after catalogue.")
-        return False
-
-    try:
-        success, books_result = _run_with_backoff(_fetch_market_books, trading, market_ids, start_ts)
-    except Exception as session_err:
-        if not _ensure_session(trading):
-            return False
-        success, books_result = _run_with_backoff(_fetch_market_books, trading, market_ids, start_ts)
-
-    if not success:
-        logger.error("listMarketBook failed (non-fatal).")
-        return False
-
-    books = books_result if isinstance(books_result, list) else []
-    from risk import compute_book_risk_l3
-
-    markets_persisted = 0
-    try:
-        conn = _get_conn()
-        for book in books:
-            if _past_deadline(start_ts):
-                break
-            market_id = book.get("marketId") if isinstance(book, dict) else getattr(book, "market_id", None) or getattr(book, "marketId", None)
-            if not market_id:
-                continue
-            market_id = str(market_id)
-            runners = book.get("runners") if isinstance(book, dict) else getattr(book, "runners", None) or []
-            if len(runners) < 3:
-                continue
-            runner_metadata = _runner_metadata_from_metadata_table(conn, market_id)
-            if not runner_metadata:
-                logger.warning("Skipping market %s: no metadata mapping in DB.", market_id)
-                continue
-            if isinstance(book, dict):
-                book_dict = book
-            else:
-                book_dict = getattr(book, "json", None) or (getattr(book, "__dict__", None) or {})
-                if not isinstance(book_dict, dict):
-                    book_dict = {"marketId": market_id, "runners": []}
-            total_matched = book.get("totalMatched") if isinstance(book, dict) else getattr(book, "totalMatched", None) or getattr(book, "total_matched", None)
-            inplay = book.get("inplay") if isinstance(book, dict) else getattr(book, "inplay", None)
-            status = book.get("status") if isinstance(book, dict) else getattr(book, "status", None)
-            total_volume = _safe_float(total_matched) if total_matched is not None else sum(
-                _safe_float(r.get("totalMatched") if isinstance(r, dict) else getattr(r, "totalMatched", None) or getattr(r, "total_matched", None))
-                for r in runners
-            )
-
-            snapshot_id = _insert_raw_snapshot(
-                conn, snapshot_at, market_id, book_dict,
-                total_matched=total_matched, inplay=inplay, status=status, depth_limit=DEPTH_LIMIT,
-            )
-            if snapshot_id is None:
-                continue
-
-            book_risk_l3 = compute_book_risk_l3(runners, runner_metadata, depth_limit=DEPTH_LIMIT)
-            best_prices = _runner_best_prices(runners, runner_metadata)
-            def _spread(back, lay):
-                if back is not None and lay is not None:
-                    return float(lay) - float(back)
-                return None
-            home_spread = _spread(best_prices.get("home_best_back"), best_prices.get("home_best_lay"))
-            away_spread = _spread(best_prices.get("away_best_back"), best_prices.get("away_best_lay"))
-            draw_spread = _spread(best_prices.get("draw_best_back"), best_prices.get("draw_best_lay"))
-            metrics = {
-                "total_volume": total_volume, "depth_limit": DEPTH_LIMIT, "calculation_version": "v1",
-                **best_prices,
-                "home_spread": home_spread, "away_spread": away_spread, "draw_spread": draw_spread,
-                "home_book_risk_l3": (book_risk_l3 or {}).get("home_book_risk_l3"),
-                "away_book_risk_l3": (book_risk_l3 or {}).get("away_book_risk_l3"),
-                "draw_book_risk_l3": (book_risk_l3 or {}).get("draw_book_risk_l3"),
-            }
-            _insert_derived_metrics(conn, snapshot_id, snapshot_at, market_id, metrics)
-            markets_persisted += 1
-        conn.close()
-    except Exception as e:
-        logger.warning("3-layer persist failed: %s", e)
-
-    duration_ms = int((time.monotonic() - start_ts) * 1000)
-    logger.info("tick_id=%s duration_ms=%s markets_count=%s", tick_id, duration_ms, markets_persisted)
-
-    _touch_heartbeat_success()
-    return True
-
-
-def _tick_sticky_prematch(trading) -> bool:
+def _tick_from_db_tracked(trading) -> bool:
     """
-    Sticky pre-match tick: A expire at kickoff, B poll tracked (batched), C discover candidates, D fill to K.
-    Tracked set is persistent; no eviction by rank.
+    Poll listMarketBook for market_ids in tracked_markets (state=TRACKING) only.
+    Tracked set is populated by discovery + selector sync; no catalogue or maturity logic here.
     """
     global _tick_id
     _tick_id += 1
@@ -845,7 +672,7 @@ def _tick_sticky_prematch(trading) -> bool:
         return False
 
     if not POSTGRES_PASSWORD:
-        logger.warning("POSTGRES_PASSWORD not set; skipping sticky pre-match.")
+        logger.warning("POSTGRES_PASSWORD not set; skipping snapshot poll.")
         _touch_heartbeat_success()
         return True
 
@@ -855,52 +682,51 @@ def _tick_sticky_prematch(trading) -> bool:
     try:
         _ensure_three_layer_tables(conn)
         sp.ensure_tables(conn)
+        _warn_if_discovery_stale(conn)
+        tracked = sp.get_tracked_active(conn, tick_id)
+        market_ids = [t["market_id"] for t in tracked]
     except Exception as e:
-        logger.warning("Table ensure failed: %s", e)
+        logger.warning("DB/tracked_markets read failed: %s", e)
         conn.close()
         _touch_heartbeat_success()
         return True
 
-    try:
-        # Step A — Expire at kickoff + buffer
-        expired = sp.expire_at_kickoff(
-            conn, now_utc, STICKY_KICKOFF_BUFFER_SECONDS, tick_id,
-        )
-        if expired:
-            logger.info("[Sticky] expired_at_kickoff=%s", expired)
+    if not market_ids:
+        conn.close()
+        _touch_heartbeat_success()
+        logger.info("tick_id=%s tracked_count=0 (run discovery_time_window to populate tracked_markets)", tick_id)
+        return True
 
-        # Step B — Poll tracked only (batched)
-        tracked = sp.get_tracked_active(conn, tick_id)
-        market_ids = [t["market_id"] for t in tracked]
-        requests_this_tick = 0
-        all_books = []
-        for i in range(0, len(market_ids), MARKET_BOOK_BATCH_SIZE):
-            batch = market_ids[i : i + MARKET_BOOK_BATCH_SIZE]
-            if _past_deadline(start_ts):
+    requests_this_tick = 0
+    all_books = []
+    for i in range(0, len(market_ids), MARKET_BOOK_BATCH_SIZE):
+        batch = market_ids[i : i + MARKET_BOOK_BATCH_SIZE]
+        if _past_deadline(start_ts):
+            break
+        try:
+            success, books_result = _run_with_backoff(_fetch_market_books, trading, batch, start_ts)
+        except Exception as session_err:
+            if not _ensure_session(trading):
                 break
-            try:
-                success, books_result = _run_with_backoff(_fetch_market_books, trading, batch, start_ts)
-            except Exception as session_err:
-                if not _ensure_session(trading):
-                    break
-                success, books_result = _run_with_backoff(_fetch_market_books, trading, batch, start_ts)
-            if not success or not books_result:
-                continue
-            books = books_result if isinstance(books_result, list) else []
-            requests_this_tick += 1
-            all_books.extend(books)
-            returned_ids = [
-                str(b.get("marketId") if isinstance(b, dict) else getattr(b, "market_id", None) or getattr(b, "marketId", None))
-                for b in books
-            ]
-            sp.update_tracked_after_poll(conn, returned_ids, now_utc)
-            dropped = sp.drop_tracked_not_found(conn, batch, returned_ids)
-            if dropped:
-                logger.info("[Sticky] dropped_not_found=%s market_ids=%s", dropped, batch[:3])
+            success, books_result = _run_with_backoff(_fetch_market_books, trading, batch, start_ts)
+        if not success or not books_result:
+            continue
+        books = books_result if isinstance(books_result, list) else []
+        requests_this_tick += 1
+        all_books.extend(books)
+        returned_ids = [
+            str(b.get("marketId") if isinstance(b, dict) else getattr(b, "market_id", None) or getattr(b, "marketId", None))
+            for b in books
+        ]
+        sp.update_tracked_after_poll(conn, returned_ids, now_utc)
+        dropped = sp.drop_tracked_not_found(conn, batch, returned_ids)
+        if dropped:
+            logger.info("[Tracked] dropped_not_found=%s market_ids=%s", dropped, batch[:3])
 
-        # Persist snapshots for all returned books (3-layer flow; no imbalance/impedance — MVP)
-        from risk import compute_book_risk_l3
-        snapshot_at = now_utc
+    from risk import compute_book_risk_l3
+    snapshot_at = now_utc
+    markets_persisted = 0
+    try:
         for book in all_books:
             if _past_deadline(start_ts):
                 break
@@ -918,7 +744,7 @@ def _tick_sticky_prematch(trading) -> bool:
             if isinstance(book, dict):
                 book_dict = book
             else:
-                book_dict = getattr(book, "json", None) or getattr(book, "__dict__", None) or {}
+                book_dict = getattr(book, "json", None) or (getattr(book, "__dict__", None) or {})
                 if not isinstance(book_dict, dict):
                     book_dict = {"marketId": market_id, "runners": []}
             total_matched = book.get("totalMatched") if isinstance(book, dict) else getattr(book, "totalMatched", None) or getattr(book, "total_matched", None)
@@ -949,136 +775,17 @@ def _tick_sticky_prematch(trading) -> bool:
                 "draw_book_risk_l3": (book_risk_l3 or {}).get("draw_book_risk_l3"),
             }
             _insert_derived_metrics(conn, snapshot_id, snapshot_at, market_id, metrics)
-
-        # Step C — Discover candidates (catalogue)
-        try:
-            success, result = _run_with_backoff(_fetch_catalogue_sticky, trading, start_ts)
-        except Exception as session_err:
-            if not _ensure_session(trading):
-                return False
-            success, result = _run_with_backoff(_fetch_catalogue_sticky, trading, start_ts)
-        catalogues = (result if isinstance(result, list) else []) if success else []
-        def _runner_count(m):
-            rc = m.get("runnerCount") if isinstance(m, dict) else getattr(m, "runnerCount", None) or getattr(m, "runner_count", None)
-            if rc is not None:
-                return int(rc) if str(rc).isdigit() else len(m.get("runners") or getattr(m, "runners", None) or [])
-            return len(m.get("runners") or getattr(m, "runners", None) or [])
-        catalogues = [c for c in catalogues if _runner_count(c) == 3]
-        tracked_ids = sp.get_tracked_market_ids_set(conn)
-        tracked_count = len(tracked_ids)
-        catalogue_candidates = sum(
-            1 for c in catalogues
-            if _get_attr(c, "market_id", "marketId") and str(_get_attr(c, "market_id", "marketId")) not in tracked_ids
-        )
-        # Build candidate list (is_mature uses seen_markets from *previous* ticks; record_seen after)
-        # When under K, use 1-tick maturity for all to fill to 200; else use near-kickoff relaxation or 2 ticks.
-        def _parse_event_start(ev):
-            if ev is None:
-                return None
-            if hasattr(ev, "isoformat"):
-                if getattr(ev, "tzinfo", None) is None:
-                    return ev.replace(tzinfo=timezone.utc)
-                return ev
-            s = str(ev).strip().replace("Z", "+00:00")
-            try:
-                dt = datetime.fromisoformat(s)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt
-            except (ValueError, TypeError):
-                return None
-        candidates = []
-        for c in catalogues:
-            market_id = _get_attr(c, "market_id", "marketId")
-            if not market_id or str(market_id) in tracked_ids:
-                continue
-            event = _get_attr(c, "event", "event")
-            event_start_raw = _get_attr(event, "open_date", "openDate") if event else None
-            event_start_utc = _parse_event_start(event_start_raw)
-            # Fill to K: when under K, allow 1-tick maturity for all; else near-kickoff 1 tick or 2 ticks
-            if tracked_count < STICKY_K:
-                require_ticks = 1
-            else:
-                delta_hours = (event_start_utc - now_utc).total_seconds() / 3600.0 if event_start_utc else None
-                require_ticks = (
-                    STICKY_NEAR_KICKOFF_CONSECUTIVE_TICKS
-                    if delta_hours is not None and delta_hours <= STICKY_NEAR_KICKOFF_HOURS
-                    else STICKY_REQUIRE_CONSECUTIVE_TICKS
-                )
-            if not sp.is_mature(
-                conn, str(market_id), event_start_utc, 0.0, tick_id, now_utc,
-                v_min=STICKY_V_MIN, t_min_hours=STICKY_T_MIN_HOURS, t_max_hours=STICKY_T_MAX_HOURS,
-                require_consecutive_ticks=require_ticks,
-            ):
-                continue
-            event_id = _get_attr(event, "id") if event else None
-            if event_id is not None:
-                event_id = str(event_id)
-            score = 0.0  # catalogue order is already by MAXIMUM_TRADED
-            candidates.append((str(market_id), event_id, event_start_utc, score))
-        matured_candidates = len(candidates)
-        # Step D — Fill capacity; upsert metadata for newly admitted
-        to_admit = [(mid, eid, est, sc) for mid, eid, est, sc in candidates]
-        admitted = sp.admit_markets(conn, to_admit, now_utc, STICKY_K)
-        catalogue_by_mid = {}
-        for c in catalogues:
-            mid = _get_attr(c, "market_id", "marketId")
-            if mid:
-                catalogue_by_mid[str(mid)] = c
-        for mid, _eid, _est, _sc in candidates[:admitted]:
-            c = catalogue_by_mid.get(mid)
-            if c:
-                meta_row = _extract_metadata_row(c)
-                if meta_row:
-                    _upsert_metadata(conn, meta_row)
-        # Record seen for next tick's maturity (2 consecutive ticks)
-        for c in catalogues:
-            mid = _get_attr(c, "market_id", "marketId")
-            if mid:
-                sp.record_seen(conn, str(mid), tick_id, now_utc)
-
-        tracked_after = len(sp.get_tracked_market_ids_set(conn))
-        duration_ms = int((time.monotonic() - start_ts) * 1000)
-        logger.info(
-            "[Sticky] tick_id=%s duration_ms=%s tracked_count=%s admitted_per_tick=%s expired=%s catalogue_candidates=%s matured_candidates=%s requests_per_tick=%s markets_polled=%s",
-            tick_id, duration_ms, tracked_after, admitted, expired, catalogue_candidates, matured_candidates, requests_this_tick, len(all_books),
-        )
+            markets_persisted += 1
     except Exception as e:
-        logger.exception("Sticky tick failed: %s", e)
+        logger.warning("3-layer persist failed: %s", e)
     finally:
         conn.close()
 
+    duration_ms = int((time.monotonic() - start_ts) * 1000)
+    logger.info("tick_id=%s duration_ms=%s tracked_count=%s markets_polled=%s markets_persisted=%s",
+                tick_id, duration_ms, len(market_ids), len(all_books), markets_persisted)
     _touch_heartbeat_success()
     return True
-
-
-def _fetch_catalogue_sticky(trading, start_ts: float):
-    """Catalogue for sticky pre-match: same filter as _fetch_catalogue but max_results = STICKY_CATALOGUE_MAX."""
-    from betfairlightweight import filters
-    if _past_deadline(start_ts):
-        raise TimeoutError("Tick deadline exceeded before catalogue")
-    now = datetime.now(timezone.utc)
-    from_ts = now - timedelta(minutes=LOOKBACK_MINUTES)
-    to_ts = now + timedelta(hours=WINDOW_HOURS)
-    time_range = filters.time_range(from_=from_ts, to=to_ts)
-    market_filter = filters.market_filter(
-        event_type_ids=[1],
-        market_type_codes=["MATCH_ODDS"],
-        market_start_time=time_range,
-    )
-    return trading.betting.list_market_catalogue(
-        filter=market_filter,
-        market_projection=[
-            "RUNNER_DESCRIPTION",
-            "MARKET_DESCRIPTION",
-            "EVENT",
-            "EVENT_TYPE",
-            "MARKET_START_TIME",
-            "COMPETITION",
-        ],
-        max_results=max(STICKY_CATALOGUE_MAX, STICKY_K),
-        sort="MAXIMUM_TRADED",
-    )
 
 
 def _run_single_shot(trading) -> bool:
@@ -1225,6 +932,48 @@ def _safe_float(val: Any) -> float:
         return 0.0
 
 
+def _log_deprecated_sticky_env():
+    """If any STICKY_* or BF_KICKOFF_BUFFER_* env is set, log once that it is deprecated and ignored."""
+    sticky_keys = [
+        "BF_STICKY_PREMATCH", "BF_STICKY_K", "BF_KICKOFF_BUFFER_SECONDS",
+        "BF_STICKY_V_MIN", "BF_STICKY_T_MIN_HOURS", "BF_STICKY_T_MAX_HOURS",
+        "BF_STICKY_REQUIRE_CONSECUTIVE_TICKS", "BF_STICKY_NEAR_KICKOFF_HOURS",
+        "BF_STICKY_NEAR_KICKOFF_CONSECUTIVE_TICKS", "BF_STICKY_CATALOGUE_MAX",
+    ]
+    present = [k for k in sticky_keys if os.environ.get(k)]
+    if present:
+        logger.warning(
+            "STICKY_* / BF_KICKOFF_BUFFER_* env vars are deprecated and ignored (tracked set is from discovery_time_window). Present: %s",
+            ", ".join(present),
+        )
+
+
+def _warn_if_discovery_stale(conn):
+    """Log WARNING if discovery has not run for more than DISCOVERY_STALE_WARNING_MINUTES."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT run_at_utc FROM discovery_run_log ORDER BY run_at_utc DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+    except Exception:
+        return
+    if not row:
+        logger.warning(
+            "Discovery has not run yet (no row in discovery_run_log). Run discovery_time_window to populate tracked_markets."
+        )
+        return
+    run_at = row[0]
+    if run_at.tzinfo is None:
+        run_at = run_at.replace(tzinfo=timezone.utc)
+    age_minutes = (datetime.now(timezone.utc) - run_at).total_seconds() / 60.0
+    if age_minutes > DISCOVERY_STALE_WARNING_MINUTES:
+        logger.warning(
+            "Discovery has not run for %.0f minutes (last run %s). Run discovery_time_window.",
+            age_minutes, run_at.isoformat(),
+        )
+
+
 def main() -> int:
     if not all([USERNAME, PASSWORD, APP_KEY]):
         missing = [k for k, v in [("BF_USERNAME/BETFAIR_USERNAME", USERNAME), ("BF_PASSWORD/BETFAIR_PASSWORD", PASSWORD), ("BF_APP_KEY/BETFAIR_APP_KEY", APP_KEY)] if not v]
@@ -1249,6 +998,8 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _request_shutdown)
     signal.signal(signal.SIGINT, _request_shutdown)
 
+    _log_deprecated_sticky_env()
+
     if SINGLE_SHOT:
         logger.info("Single-shot mode: fetch one market, print raw JSON, save to file, persist with raw_payload, then exit.")
         try:
@@ -1263,17 +1014,11 @@ def main() -> int:
             logger.warning("Logout failed: %s", e)
         return 0
 
-    tick_fn = _tick_sticky_prematch if STICKY_PREMATCH else _tick
-    if STICKY_PREMATCH:
-        logger.info(
-            "Daemon started (STICKY PRE-MATCH). K=%s, kickoff_buffer=%ss, interval=%ds, catalogue_max=%s, batch_size=%s",
-            STICKY_K, STICKY_KICKOFF_BUFFER_SECONDS, INTERVAL_SECONDS, STICKY_CATALOGUE_MAX, MARKET_BOOK_BATCH_SIZE,
-        )
-    else:
-        logger.info(
-            "Daemon started. Interval=%ds, deadline=%ds, window_hours=%s, lookback_min=%s, heartbeat_alive=%s",
-            INTERVAL_SECONDS, TICK_DEADLINE_SECONDS, WINDOW_HOURS, LOOKBACK_MINUTES, HEARTBEAT_ALIVE_PATH,
-        )
+    tick_fn = _tick_from_db_tracked
+    logger.info(
+        "Daemon started (tracked set from DB). Poll interval=%ds, batch_size=%s. Run discovery_time_window to populate tracked_markets.",
+        INTERVAL_SECONDS, MARKET_BOOK_BATCH_SIZE,
+    )
 
     try:
         tick_fn(_trading_client)

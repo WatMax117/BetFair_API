@@ -200,11 +200,20 @@ Verify:
 
 ## 10. REST Discovery (Cron)
 
-REST discovery (`discovery_hourly.py`) is usually scheduled via cron, not Docker. Ensure cron is configured, e.g.:
+REST discovery (**`discovery_time_window.py`**) populates `rest_events`, `rest_markets`, `market_event_metadata`, and **`tracked_markets`** (from selector). The REST daemon only polls markets in `tracked_markets`; it does **not** call catalogue. Schedule via cron:
 
 ```bash
-0 * * * * cd /opt/netbet/betfair-rest-client && . ../.env 2>/dev/null; python discovery_hourly.py >> /var/log/discovery_hourly.log 2>&1
+./scripts/ensure_discovery_cron.sh        # check
+./scripts/ensure_discovery_cron.sh install # install (every 15 min via Docker)
 ```
+
+Or after a full deploy of the REST discovery refactor:
+
+```bash
+./scripts/deploy_rest_discovery_refactor_vps.sh   # on VPS, after git pull
+```
+
+Discovery window: `DISCOVERY_LOOKBACK_MINUTES=60`, `DISCOVERY_HORIZON_HOURS=48`. Cap: `DISCOVERY_STREAM_CAP=200`. See **docs/REST_DISCOVERY_VS_SNAPSHOT_REFACTOR.md**.
 
 ---
 
