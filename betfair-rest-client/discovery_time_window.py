@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
 """
-Time-window discovery: listMarketCatalogue for football in [now - lookback, now + horizon].
-Market types: MATCH_ODDS, NEXT_GOAL only. Upserts rest_events, rest_markets, market_event_metadata.
-Then runs selector sync to update tracked_markets from desired_markets_to_track view.
+Event-driven discovery: listEvents (time windows) -> events_discovered; then listMarketCatalogue by eventIds batches -> rest_events, rest_markets.
+Single writer to rest_markets. No catalogue-by-time+sort (legacy path removed).
+Market types: MATCH_ODDS, NEXT_GOAL only. Then sync tracked_markets from desired_markets_to_track.
 
 Config (env):
   DISCOVERY_LOOKBACK_MINUTES   default 60
-  DISCOVERY_HORIZON_HOURS      default 48  (H in spec)
+  DISCOVERY_HORIZON_HOURS     default 48
+  DISCOVERY_EVENT_BATCH_SIZE  eventIds per listMarketCatalogue call (default 50; halved on TOO_MUCH_DATA)
+  DISCOVERY_CHUNK_HOURS       hours per listEvents window (default 12)
+  DISCOVERY_STREAM_CAP        (removed: no cap on tracked_markets)
+  DISCOVERY_MATCH_ODDS_AFTER_KICKOFF_HOURS  keep MATCH_ODDS in desired set for this many hours after kickoff (default 3)
+  DISCOVERY_MATCH_ODDS_HORIZON_HOURS       subscribe to MATCH_ODDS only when start is within this many hours (default 24; capped at 24 if set higher)
 
 Run: python discovery_time_window.py
-Cron (e.g. every 15 min): */15 * * * * cd /opt/netbet/betfair-rest-client && python discovery_time_window.py
-
-See docs/REST_DISCOVERY_VS_SNAPSHOT_REFACTOR.md for architecture and tuning.
+Cron: */15 * * * * (every 15 min)
 """
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -30,11 +34,19 @@ logger = logging.getLogger("discovery_time_window")
 LOOKBACK_MINUTES = int(os.environ.get("DISCOVERY_LOOKBACK_MINUTES", "60"))
 HORIZON_HOURS = float(os.environ.get("DISCOVERY_HORIZON_HOURS", "48"))
 MARKET_TYPES = ["MATCH_ODDS", "NEXT_GOAL"]
-MAX_RESULTS = int(os.environ.get("DISCOVERY_MAX_RESULTS", "500"))
-# Cap for streaming (deterministic truncation if desired set exceeds this)
-DISCOVERY_STREAM_CAP = int(os.environ.get("DISCOVERY_STREAM_CAP", "200"))
-# If discovery hasn't run for longer than this, daemon logs WARNING (see main.py)
+# Event-driven: eventIds batch size for listMarketCatalogue (halved on TOO_MUCH_DATA)
+EVENT_BATCH_SIZE = int(os.environ.get("DISCOVERY_EVENT_BATCH_SIZE", "50"))
+# Hours per listEvents time window (chunk horizon to avoid large responses)
+CHUNK_HOURS = float(os.environ.get("DISCOVERY_CHUNK_HOURS", "12"))
+# Cap for streaming (tracked_markets) - REMOVED: all desired markets are now tracked
+MATCH_ODDS_AFTER_KICKOFF_HOURS = float(os.environ.get("DISCOVERY_MATCH_ODDS_AFTER_KICKOFF_HOURS", "3"))
+# Subscribe to MATCH_ODDS only when event start is within this many hours (capped at 24)
+_raw = float(os.environ.get("DISCOVERY_MATCH_ODDS_HORIZON_HOURS", "24"))
+MATCH_ODDS_HORIZON_HOURS = min(24, _raw) if _raw > 24 else _raw
 DISCOVERY_STALE_WARNING_MINUTES = int(os.environ.get("DISCOVERY_STALE_WARNING_MINUTES", "45"))
+
+# Legacy (unused): kept only for env reference; discovery is event-driven only
+MAX_RESULTS = int(os.environ.get("DISCOVERY_MAX_RESULTS", "200"))
 
 
 def _get_attr(obj: Any, *keys: str):
@@ -62,32 +74,159 @@ def _normalise_market_type(bt: Optional[str]) -> Optional[str]:
     return None
 
 
-def _fetch_catalogue_time_window(trading, lookback_minutes: int, horizon_hours: float, max_results: int) -> List[Any]:
+# --- Event-driven discovery (single writer to rest_markets) ---
+
+TOO_MUCH_DATA_CODE = "TOO_MUCH_DATA"
+MAX_RETRIES_TRANSIENT = 3
+BACKOFF_BASE_SEC = 2
+
+
+def _retry_with_backoff(fn, *args, _max_retries=MAX_RETRIES_TRANSIENT, _backoff_base=BACKOFF_BASE_SEC, **kwargs):
+    """Run fn(*args, **kwargs); on transient failure retry with exponential backoff. Reraises TOO_MUCH_DATA."""
+    last_exc = None
+    for attempt in range(_max_retries):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            last_exc = e
+            if getattr(e, "error_code", None) == TOO_MUCH_DATA_CODE:
+                raise
+            if attempt == _max_retries - 1:
+                raise
+            delay = _backoff_base * (2 ** attempt)
+            logger.warning("Transient error (attempt %s/%s), retry in %.1fs: %s", attempt + 1, _max_retries, delay, e)
+            time.sleep(delay)
+    raise last_exc
+
+
+def _upsert_events_discovered(conn, event_id: str, kickoff_utc: Any, competition_id: Optional[str], competition_name: Optional[str]):
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO events_discovered (event_id, kickoff_utc, competition_id, competition_name, last_seen_at_utc)
+            VALUES (%s, %s, %s, %s, (now() AT TIME ZONE 'UTC'))
+            ON CONFLICT (event_id) DO UPDATE SET
+                kickoff_utc = COALESCE(EXCLUDED.kickoff_utc, events_discovered.kickoff_utc),
+                competition_id = COALESCE(EXCLUDED.competition_id, events_discovered.competition_id),
+                competition_name = COALESCE(EXCLUDED.competition_name, events_discovered.competition_name),
+                last_seen_at_utc = (now() AT TIME ZONE 'UTC')
+        """, (event_id, kickoff_utc, competition_id, competition_name))
+    conn.commit()
+
+
+def _fetch_events_time_window(trading, conn, lookback_minutes: int, horizon_hours: float, chunk_hours: float) -> int:
+    """
+    Call listEvents for Football (eventTypeIds=[1]) in time chunks with marketTypeCodes filter.
+    Upsert event_id, kickoff_utc, competition_id, competition_name into events_discovered.
+    Returns count of events upserted.
+    """
     from betfairlightweight import filters
     now = datetime.now(timezone.utc)
     from_ts = now - timedelta(minutes=lookback_minutes)
     to_ts = now + timedelta(hours=horizon_hours)
-    time_range = filters.time_range(from_=from_ts, to=to_ts)
+    count = 0
+    chunk_sec = max(1, int(chunk_hours * 3600))
+    t0 = from_ts
+    while t0 < to_ts:
+        t1 = min(t0 + timedelta(seconds=chunk_sec), to_ts)
+        time_range = filters.time_range(from_=t0, to=t1)
+        market_filter = filters.market_filter(
+            event_type_ids=[1],
+            market_type_codes=MARKET_TYPES,
+            market_start_time=time_range,
+        )
+        try:
+            result = _retry_with_backoff(trading.betting.list_events, filter=market_filter)
+        except Exception as e:
+            logger.exception("listEvents failed for window %s–%s: %s", t0, t1, e)
+            t0 = t1
+            continue
+        lst = result if isinstance(result, list) else []
+        for item in lst:
+            ev = _get_attr(item, "event", "event")
+            if not ev:
+                continue
+            eid = _get_attr(ev, "id")
+            if not eid:
+                continue
+            eid = str(eid)
+            open_date = _get_attr(ev, "openDate", "open_date")
+            comp = _get_attr(item, "competition", "competition")
+            cid = _get_attr(comp, "id") if comp else None
+            cname = _get_attr(comp, "name") if comp else None
+            if cid is not None:
+                cid = str(cid)
+            _upsert_events_discovered(conn, eid, open_date, cid, cname)
+            count += 1
+        t0 = t1
+    return count
+
+
+def _get_event_ids_in_window(conn, lookback_minutes: int, horizon_hours: float) -> List[str]:
+    """Return event_ids from events_discovered in [now - lookback, now + horizon]."""
+    now = datetime.now(timezone.utc)
+    from_ts = now - timedelta(minutes=lookback_minutes)
+    to_ts = now + timedelta(hours=horizon_hours)
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT event_id FROM events_discovered
+            WHERE kickoff_utc IS NOT NULL
+              AND kickoff_utc >= %s AND kickoff_utc <= %s
+            ORDER BY kickoff_utc
+        """, (from_ts, to_ts))
+        return [row[0] for row in cur.fetchall()]
+
+
+def _fetch_catalogue_for_event_batch(trading, event_ids_batch: List[str], max_results: int = 200) -> List[Any]:
+    """
+    One listMarketCatalogue call with filter.eventIds = event_ids_batch.
+    Raises with error_code TOO_MUCH_DATA if batch too large; caller should halve and retry.
+    """
+    from betfairlightweight import filters
     market_filter = filters.market_filter(
-        event_type_ids=[1],
+        event_ids=event_ids_batch,
         market_type_codes=MARKET_TYPES,
-        market_start_time=time_range,
     )
     result = trading.betting.list_market_catalogue(
         filter=market_filter,
-        market_projection=[
-            "RUNNER_DESCRIPTION",
-            "MARKET_DESCRIPTION",
-            "EVENT",
-            "EVENT_TYPE",
-            "MARKET_START_TIME",
-            "COMPETITION",
-        ],
+        market_projection=["EVENT", "MARKET_START_TIME", "MARKET_DESCRIPTION", "RUNNER_DESCRIPTION", "COMPETITION"],
         max_results=max_results,
-        sort="MAXIMUM_TRADED",
     )
     lst = result if isinstance(result, list) else []
     return list(lst)
+
+
+def _fetch_catalogue_by_event_ids(
+    trading, event_ids: List[str], batch_size: int, max_results: int = 200
+) -> List[Any]:
+    """
+    Split event_ids into batches of batch_size; call listMarketCatalogue per batch.
+    On TOO_MUCH_DATA, retry with batch_size halved (min 1). Returns concatenated catalogue list.
+    """
+    all_catalogues = []
+    current_batch_size = batch_size
+    idx = 0
+    while idx < len(event_ids):
+        batch = event_ids[idx : idx + current_batch_size]
+        if not batch:
+            idx += current_batch_size
+            continue
+        try:
+            chunk = _retry_with_backoff(_fetch_catalogue_for_event_batch, trading, batch, max_results)
+            all_catalogues.extend(chunk)
+            idx += len(batch)
+            current_batch_size = batch_size  # reset after success in case we had halved
+        except Exception as e:
+            if getattr(e, "error_code", None) == TOO_MUCH_DATA_CODE:
+                if current_batch_size <= 1:
+                    logger.error("TOO_MUCH_DATA with batch_size=1, skipping batch of %s events", len(batch))
+                    idx += len(batch)
+                    continue
+                new_size = max(1, current_batch_size // 2)
+                logger.warning("TOO_MUCH_DATA for batch size %s, retrying with %s", current_batch_size, new_size)
+                current_batch_size = new_size
+                continue
+            raise
+    return all_catalogues
 
 
 def _ensure_tables_and_views(conn):
@@ -111,11 +250,23 @@ def _ensure_tables_and_views(conn):
                 market_type       VARCHAR(64) NOT NULL,
                 market_name       TEXT,
                 market_start_time TIMESTAMPTZ,
+                total_matched     NUMERIC(20, 2) NULL,
                 last_seen_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
         """)
+        cur.execute("ALTER TABLE rest_markets ADD COLUMN IF NOT EXISTS total_matched NUMERIC(20, 2) NULL;")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rest_markets_event_id ON rest_markets(event_id);")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_rest_markets_market_type ON rest_markets(market_type);")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS events_discovered (
+                event_id          VARCHAR(32) PRIMARY KEY,
+                kickoff_utc       TIMESTAMPTZ,
+                competition_id    VARCHAR(32),
+                competition_name  TEXT,
+                last_seen_at_utc  TIMESTAMPTZ NOT NULL DEFAULT (now() AT TIME ZONE 'UTC')
+            );
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_events_discovered_kickoff ON events_discovered(kickoff_utc);")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS market_event_metadata (
                 market_id TEXT PRIMARY KEY,
@@ -154,15 +305,15 @@ def _ensure_tables_and_views(conn):
             WHERE (
                 (rm.market_type = 'MATCH_ODDS_FT'
                  AND rm.market_start_time IS NOT NULL
-                 AND rm.market_start_time >= (now() AT TIME ZONE 'UTC')
-                 AND rm.market_start_time <= (now() AT TIME ZONE 'UTC') + interval '48 hours')
+                 AND rm.market_start_time >= (now() AT TIME ZONE 'UTC') - interval '%s hours'
+                 AND rm.market_start_time <= (now() AT TIME ZONE 'UTC') + interval '%s hours')
                 OR
                 (rm.market_type = 'NEXT_GOAL'
                  AND e.open_date IS NOT NULL
                  AND e.open_date <= (now() AT TIME ZONE 'UTC')
                  AND e.open_date >= (now() AT TIME ZONE 'UTC') - interval '3 hours')
             );
-        """)
+        """ % (int(MATCH_ODDS_AFTER_KICKOFF_HOURS), int(MATCH_ODDS_HORIZON_HOURS)))
         cur.execute("""
             CREATE OR REPLACE VIEW active_markets_to_stream AS
             SELECT t.market_id, t.event_id, rm.market_type, rm.market_name, rm.market_start_time
@@ -206,18 +357,20 @@ def _upsert_event(conn, event_id: str, event_name: Optional[str], open_date: Any
     conn.commit()
 
 
-def _upsert_market(conn, market_id: str, event_id: str, market_type: str, market_name: Optional[str], market_start_time: Any):
+def _upsert_market(conn, market_id: str, event_id: str, market_type: str, market_name: Optional[str], market_start_time: Any, total_matched: Optional[float] = None):
+    """Upsert one row into rest_markets. total_matched from listMarketCatalogue (overwrite on each refresh)."""
     with conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO rest_markets (market_id, event_id, market_type, market_name, market_start_time, last_seen_at)
-            VALUES (%s, %s, %s, %s, %s, NOW())
+            INSERT INTO rest_markets (market_id, event_id, market_type, market_name, market_start_time, total_matched, last_seen_at)
+            VALUES (%s, %s, %s, %s, %s, %s, NOW())
             ON CONFLICT (market_id) DO UPDATE SET
                 event_id = EXCLUDED.event_id,
                 market_type = EXCLUDED.market_type,
                 market_name = COALESCE(EXCLUDED.market_name, rest_markets.market_name),
                 market_start_time = COALESCE(EXCLUDED.market_start_time, rest_markets.market_start_time),
+                total_matched = EXCLUDED.total_matched,
                 last_seen_at = NOW()
-        """, (market_id, event_id, market_type, market_name, market_start_time))
+        """, (market_id, event_id, market_type, market_name, market_start_time, total_matched))
     conn.commit()
 
 
@@ -321,9 +474,9 @@ def _upsert_metadata(conn, row: Dict):
 def sync_desired_to_tracked(conn) -> Dict[str, Any]:
     """
     Sync desired_markets_to_track view to tracked_markets.
-    Applies DISCOVERY_STREAM_CAP with prioritization: MATCH_ODDS_FT first (by market_start_time), then NEXT_GOAL.
-    Returns added, dropped, desired_count (before cap), tracked_count_after, earliest_kickoff, latest_kickoff,
-    truncated_count, truncation_rule.
+    No cap: all desired markets are promoted to TRACKING. Order: MATCH_ODDS_FT first (by market_start_time), then NEXT_GOAL.
+    Returns added, dropped, desired_count, tracked_count_after, earliest_kickoff, latest_kickoff,
+    truncated_count (always 0), truncation_rule (always None).
     """
     with conn.cursor() as cur:
         cur.execute("""
@@ -335,9 +488,9 @@ def sync_desired_to_tracked(conn) -> Dict[str, Any]:
         cur.execute("SELECT market_id FROM tracked_markets WHERE state = 'TRACKING'")
         current = {r[0] for r in cur.fetchall()}
     desired_count_full = len(desired_full)
-    desired = desired_full[:DISCOVERY_STREAM_CAP] if desired_count_full > DISCOVERY_STREAM_CAP else desired_full
-    truncated_count = desired_count_full - len(desired) if desired_count_full > DISCOVERY_STREAM_CAP else 0
-    truncation_rule = "stream_cap" if truncated_count > 0 else None
+    desired = desired_full
+    truncated_count = 0
+    truncation_rule = None
     desired_ids = {r[0] for r in desired}
     to_add = desired_ids - current
     to_drop = current - desired_ids
@@ -386,14 +539,29 @@ def sync_desired_to_tracked(conn) -> Dict[str, Any]:
 
 def run_discovery(conn, trading) -> Dict[str, Any]:
     run_start = datetime.now(timezone.utc)
-    logger.info("Time-window discovery: lookback=%sm horizon=%sh types=%s", LOOKBACK_MINUTES, HORIZON_HOURS, MARKET_TYPES)
+    logger.info(
+        "Event-driven discovery: lookback=%sm horizon=%sh chunk=%sh batch=%s types=%s",
+        LOOKBACK_MINUTES, HORIZON_HOURS, CHUNK_HOURS, EVENT_BATCH_SIZE, MARKET_TYPES,
+    )
     try:
-        catalogues = _fetch_catalogue_time_window(trading, LOOKBACK_MINUTES, HORIZON_HOURS, MAX_RESULTS)
+        events_count = _fetch_events_time_window(trading, conn, LOOKBACK_MINUTES, HORIZON_HOURS, CHUNK_HOURS)
+        logger.info("Events discovered: %s", events_count)
     except Exception as e:
-        logger.exception("listMarketCatalogue failed: %s", e)
+        logger.exception("listEvents (event phase) failed: %s", e)
+        return {"error": str(e), "markets_stored": 0}
+    event_ids = _get_event_ids_in_window(conn, LOOKBACK_MINUTES, HORIZON_HOURS)
+    if not event_ids:
+        logger.warning("No event_ids in window; running sync only")
+        sync_result = sync_desired_to_tracked(conn)
+        _log_discovery_run(conn, run_start, 0, sync_result)
+        return {"markets_stored": 0, "sync": sync_result}
+    try:
+        catalogues = _fetch_catalogue_by_event_ids(trading, event_ids, EVENT_BATCH_SIZE, max_results=200)
+    except Exception as e:
+        logger.exception("listMarketCatalogue (market phase) failed: %s", e)
         return {"error": str(e), "markets_stored": 0}
     if not catalogues:
-        logger.warning("Catalogue returned no markets")
+        logger.warning("Catalogue returned no markets for %s events", len(event_ids))
         sync_result = sync_desired_to_tracked(conn)
         _log_discovery_run(conn, run_start, 0, sync_result)
         return {"markets_stored": 0, "sync": sync_result}
@@ -424,7 +592,13 @@ def run_discovery(conn, trading) -> Dict[str, Any]:
             _upsert_event(conn, str(event_id), event_name, event_open_date, competition_name, home_team, away_team)
         market_name = _get_attr(_get_attr(c, "description", "market_description"), "marketName", "market_name")
         market_start_time = _get_attr(c, "marketStartTime", "market_start_time")
-        _upsert_market(conn, market_id, str(event_id), norm, market_name, market_start_time)
+        total_matched = _get_attr(c, "totalMatched", "total_matched")
+        if total_matched is not None and not isinstance(total_matched, (int, float)):
+            try:
+                total_matched = float(total_matched)
+            except (TypeError, ValueError):
+                total_matched = None
+        _upsert_market(conn, market_id, str(event_id), norm, market_name, market_start_time, total_matched)
         meta_row = _extract_metadata_row(c)
         if meta_row:
             try:
@@ -434,12 +608,6 @@ def run_discovery(conn, trading) -> Dict[str, Any]:
         markets_stored += 1
     sync_result = sync_desired_to_tracked(conn)
     _log_discovery_run(conn, run_start, markets_stored, sync_result)
-    if sync_result.get("truncated_count", 0) > 0:
-        logger.warning(
-            "Selector output exceeded stream cap: desired_count=%s cap=%s truncated_count=%s rule=%s",
-            sync_result["desired_count"], DISCOVERY_STREAM_CAP,
-            sync_result["truncated_count"], sync_result.get("truncation_rule"),
-        )
     return {"markets_stored": markets_stored, "sync": sync_result}
 
 

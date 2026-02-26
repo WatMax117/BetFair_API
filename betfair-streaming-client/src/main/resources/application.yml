@@ -35,11 +35,8 @@ betfair:
   market-ids: []
   subscribe-from-db: ${BETFAIR_SUBSCRIBE_FROM_DB:true}
   subscription-refresh-interval-minutes: ${BETFAIR_SUBSCRIPTION_REFRESH_INTERVAL_MINUTES:3}
-  # Max markets per subscription message (safety cap below Betfair ~200). Each batch sent on same connection.
+  # Max markets per subscription message (batch size). Each batch sent on same connection. No subscription cap.
   subscription-batch-size: ${BETFAIR_SUBSCRIPTION_BATCH_SIZE:177}
-  # subscription-limit: 0 = subscribe to all eligible markets; >0 = reduced set (priority IDs included first)
-  subscription-limit: ${BETFAIR_SUBSCRIPTION_LIMIT:0}
-  subscription-priority-market-ids: ${BETFAIR_SUBSCRIPTION_PRIORITY_MARKET_IDS:}
   priority-subscription-enabled: ${BETFAIR_PRIORITY_SUBSCRIPTION_ENABLED:true}
   stream-duration-minutes: ${BETFAIR_STREAM_DURATION_MINUTES:0}
   reconnect-enabled: ${BETFAIR_RECONNECT_ENABLED:true}
@@ -65,3 +62,7 @@ betfair:
     batch-size: ${BETFAIR_POSTGRES_SINK_BATCH_SIZE:200}
     ingest-source: ${BETFAIR_POSTGRES_SINK_INGEST_SOURCE:stream_api}
     client-version: ${BETFAIR_POSTGRES_SINK_CLIENT_VERSION:1.0}
+  recovery:
+    cache-ttl-ms: ${BETFAIR_RECOVERY_CACHE_TTL_MS:86400000}
+    circuit-failure-threshold: ${BETFAIR_RECOVERY_CIRCUIT_FAILURE_THRESHOLD:5}
+    circuit-cooldown-ms: ${BETFAIR_RECOVERY_CIRCUIT_COOLDOWN_MS:60000}
