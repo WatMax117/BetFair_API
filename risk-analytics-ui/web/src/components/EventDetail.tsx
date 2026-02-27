@@ -213,6 +213,44 @@ export function EventDetail({
   const selectedBucketData = selectedBucket
     ? buckets.find((p) => p.bucket_start === selectedBucket)
     : null
+
+  /** One column per unique publish_time; API returns one row per (time, runner), so we merge into one row per time. */
+  const ticksMergedByTime = useMemo(() => {
+    const result: Array<{
+      publish_time: string | null
+      home_back_odds: number | null
+      home_back_size: number | null
+      away_back_odds: number | null
+      away_back_size: number | null
+      draw_back_odds: number | null
+      draw_back_size: number | null
+    }> = []
+    let currentTime: string | null = null
+    let current: (typeof result)[0] | null = null
+    for (const t of ticks) {
+      if (t.publish_time !== currentTime) {
+        currentTime = t.publish_time
+        current = {
+          publish_time: t.publish_time,
+          home_back_odds: t.home_back_odds ?? null,
+          home_back_size: t.home_back_size ?? null,
+          away_back_odds: t.away_back_odds ?? null,
+          away_back_size: t.away_back_size ?? null,
+          draw_back_odds: t.draw_back_odds ?? null,
+          draw_back_size: t.draw_back_size ?? null,
+        }
+        result.push(current)
+      } else if (current) {
+        if (t.home_back_odds != null) current.home_back_odds = t.home_back_odds
+        if (t.home_back_size != null) current.home_back_size = t.home_back_size
+        if (t.away_back_odds != null) current.away_back_odds = t.away_back_odds
+        if (t.away_back_size != null) current.away_back_size = t.away_back_size
+        if (t.draw_back_odds != null) current.draw_back_odds = t.draw_back_odds
+        if (t.draw_back_size != null) current.draw_back_size = t.draw_back_size
+      }
+    }
+    return result
+  }, [ticks])
   
   const homeSpread = selectedBucketData ? spread(selectedBucketData.home_best_back, selectedBucketData.home_best_lay) : null
   const awaySpread = selectedBucketData ? spread(selectedBucketData.away_best_back, selectedBucketData.away_best_lay) : null
@@ -487,8 +525,8 @@ export function EventDetail({
                     const bucketStart = new Date(selectedBucket)
                     const bucketEnd = new Date(bucketStart.getTime() + 15 * 60 * 1000)
                     const tickCountDisplay = selectedBucketData?.tick_count ?? ticks.length
-                    const firstTick = ticks.length > 0 ? ticks[0]?.publish_time : null
-                    const lastTick = ticks.length > 0 ? ticks[ticks.length - 1]?.publish_time : null
+                    const firstTick = ticksMergedByTime.length > 0 ? ticksMergedByTime[0]?.publish_time ?? null : null
+                    const lastTick = ticksMergedByTime.length > 0 ? ticksMergedByTime[ticksMergedByTime.length - 1]?.publish_time ?? null : null
                     const mediansNonNull = selectedBucketData && (
                       selectedBucketData.home_back_odds_median != null || selectedBucketData.away_back_odds_median != null || selectedBucketData.draw_back_odds_median != null
                     )
@@ -516,15 +554,15 @@ export function EventDetail({
                         <TableHead>
                           <TableRow>
                             <TableCell sx={{ minWidth: 72 }}>Runner</TableCell>
-                            {ticks.map((tick, i) => (
+                            {ticksMergedByTime.map((row, i) => (
                               <TableCell key={i} align="right" sx={{ minWidth: 90 }}>
-                                {tick.publish_time ? formatTime(tick.publish_time, useUtc) : '—'}
+                                {row.publish_time ? formatTime(row.publish_time, useUtc) : '—'}
                               </TableCell>
                             ))}
                           </TableRow>
                         </TableHead>
                         <TableBody>
-                          {ticks.length === 0 ? (
+                          {ticksMergedByTime.length === 0 ? (
                             <TableRow>
                               <TableCell colSpan={2} align="center">
                                 <Typography color="text.secondary">No ticks found in this bucket</Typography>
@@ -534,25 +572,25 @@ export function EventDetail({
                             <>
                               <TableRow>
                                 <TableCell><strong>Home</strong></TableCell>
-                                {ticks.map((tick, i) => (
+                                {ticksMergedByTime.map((row, i) => (
                                   <TableCell key={i} align="right">
-                                    {formatOdds(tick.home_back_odds).text} / {num(tick.home_back_size ?? null)}
+                                    {formatOdds(row.home_back_odds).text} / {num(row.home_back_size ?? null)}
                                   </TableCell>
                                 ))}
                               </TableRow>
                               <TableRow>
                                 <TableCell><strong>Away</strong></TableCell>
-                                {ticks.map((tick, i) => (
+                                {ticksMergedByTime.map((row, i) => (
                                   <TableCell key={i} align="right">
-                                    {formatOdds(tick.away_back_odds).text} / {num(tick.away_back_size ?? null)}
+                                    {formatOdds(row.away_back_odds).text} / {num(row.away_back_size ?? null)}
                                   </TableCell>
                                 ))}
                               </TableRow>
                               <TableRow>
                                 <TableCell><strong>Draw</strong></TableCell>
-                                {ticks.map((tick, i) => (
+                                {ticksMergedByTime.map((row, i) => (
                                   <TableCell key={i} align="right">
-                                    {formatOdds(tick.draw_back_odds).text} / {num(tick.draw_back_size ?? null)}
+                                    {formatOdds(row.draw_back_odds).text} / {num(row.draw_back_size ?? null)}
                                   </TableCell>
                                 ))}
                               </TableRow>
