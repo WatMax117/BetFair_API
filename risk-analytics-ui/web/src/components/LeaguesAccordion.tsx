@@ -310,10 +310,10 @@ function DatePickerButton({
             font: 'inherit',
           }}
         >
-          <Box component="span" className="calLine calLine1" sx={{ font: 'inherit', lineHeight: 1, p: 0, m: 0 }}>
+          <Box component="span" className="calLine calLine1" sx={{ fontFamily: '"DSEG7ModernMini", monospace', fontWeight: 700, fontStyle: 'italic', lineHeight: 1, p: 0, m: 0 }}>
             {dayjs.utc(selectedDate).format('MM/DD')}
           </Box>
-          <Box component="span" className="calLine calLine2" sx={{ font: 'inherit', lineHeight: 1, p: 0, m: 0 }}>
+          <Box component="span" className="calLine calLine2" sx={{ fontFamily: '"DSEG7ModernMini", monospace', fontWeight: 700, fontStyle: 'italic', lineHeight: 1, p: 0, m: 0 }}>
             {dayjs.utc(selectedDate).format('YYYY')}
           </Box>
         </Box>
