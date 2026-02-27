@@ -515,34 +515,48 @@ export function EventDetail({
                       <Table size="small" stickyHeader>
                         <TableHead>
                           <TableRow>
-                            <TableCell>publish_time</TableCell>
-                            <TableCell align="right">H Back Odds</TableCell>
-                            <TableCell align="right">H Back Size</TableCell>
-                            <TableCell align="right">A Back Odds</TableCell>
-                            <TableCell align="right">A Back Size</TableCell>
-                            <TableCell align="right">D Back Odds</TableCell>
-                            <TableCell align="right">D Back Size</TableCell>
+                            <TableCell sx={{ minWidth: 72 }}>Runner</TableCell>
+                            {ticks.map((tick, i) => (
+                              <TableCell key={i} align="right" sx={{ minWidth: 90 }}>
+                                {tick.publish_time ? formatTime(tick.publish_time, useUtc) : '—'}
+                              </TableCell>
+                            ))}
                           </TableRow>
                         </TableHead>
                         <TableBody>
                           {ticks.length === 0 ? (
                             <TableRow>
-                              <TableCell colSpan={7} align="center">
+                              <TableCell colSpan={2} align="center">
                                 <Typography color="text.secondary">No ticks found in this bucket</Typography>
                               </TableCell>
                             </TableRow>
                           ) : (
-                            ticks.map((tick, i) => (
-                              <TableRow key={i}>
-                                <TableCell>{tick.publish_time ? formatTime(tick.publish_time, useUtc) : '—'}</TableCell>
-                                <TableCell align="right">{formatOdds(tick.home_back_odds).text}</TableCell>
-                                <TableCell align="right">{num(tick.home_back_size ?? null)}</TableCell>
-                                <TableCell align="right">{formatOdds(tick.away_back_odds).text}</TableCell>
-                                <TableCell align="right">{num(tick.away_back_size ?? null)}</TableCell>
-                                <TableCell align="right">{formatOdds(tick.draw_back_odds).text}</TableCell>
-                                <TableCell align="right">{num(tick.draw_back_size ?? null)}</TableCell>
+                            <>
+                              <TableRow>
+                                <TableCell><strong>Home</strong></TableCell>
+                                {ticks.map((tick, i) => (
+                                  <TableCell key={i} align="right">
+                                    {formatOdds(tick.home_back_odds).text} / {num(tick.home_back_size ?? null)}
+                                  </TableCell>
+                                ))}
                               </TableRow>
-                            ))
+                              <TableRow>
+                                <TableCell><strong>Away</strong></TableCell>
+                                {ticks.map((tick, i) => (
+                                  <TableCell key={i} align="right">
+                                    {formatOdds(tick.away_back_odds).text} / {num(tick.away_back_size ?? null)}
+                                  </TableCell>
+                                ))}
+                              </TableRow>
+                              <TableRow>
+                                <TableCell><strong>Draw</strong></TableCell>
+                                {ticks.map((tick, i) => (
+                                  <TableCell key={i} align="right">
+                                    {formatOdds(tick.draw_back_odds).text} / {num(tick.draw_back_size ?? null)}
+                                  </TableCell>
+                                ))}
+                              </TableRow>
+                            </>
                           )}
                         </TableBody>
                       </Table>
