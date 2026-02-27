@@ -437,22 +437,35 @@ export function EventDetail({
 
               {/* Bucket Selection */}
               <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>Select 15-minute bucket</Typography>
-              <Box sx={{ mb: 2, display: 'flex', flexWrap: 'wrap', gap: 1 }}>
-                {buckets.slice(0, bucketListVisible).map((point) => (
-                  <Button
-                    key={point.bucket_start}
-                    variant={selectedBucket === point.bucket_start ? 'contained' : 'outlined'}
-                    size="small"
-                    onClick={() => setSelectedBucket(point.bucket_start)}
-                    sx={{ minWidth: 'auto' }}
-                  >
-                    {point.bucket_start
-                      ? (useUtc
-                          ? new Date(point.bucket_start).toLocaleTimeString('en-GB', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' })
-                          : new Date(point.bucket_start).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }))
-                      : '—'}
-                  </Button>
-                ))}
+              <Box sx={{ mb: 2, display: 'flex', flexWrap: 'wrap', gap: 1, alignItems: 'center' }}>
+                {buckets.slice(0, bucketListVisible).map((point) => {
+                  const hasData = (point.tick_count ?? 0) > 0
+                  const isCarryForward =
+                    (point.tick_count == null || point.tick_count === 0) &&
+                    (point.home_back_odds_median != null || point.away_back_odds_median != null || point.draw_back_odds_median != null)
+                  return (
+                    <Button
+                      key={point.bucket_start}
+                      variant={selectedBucket === point.bucket_start ? 'contained' : 'outlined'}
+                      size="small"
+                      onClick={() => setSelectedBucket(point.bucket_start)}
+                      sx={{
+                        minWidth: 56,
+                        width: 56,
+                        ...(selectedBucket !== point.bucket_start && hasData && !isCarryForward && {
+                          bgcolor: 'rgba(33, 150, 243, 0.12)',
+                          '&:hover': { bgcolor: 'rgba(33, 150, 243, 0.2)' },
+                        }),
+                      }}
+                    >
+                      {point.bucket_start
+                        ? (useUtc
+                            ? new Date(point.bucket_start).toLocaleTimeString('en-GB', { timeZone: 'UTC', hour: '2-digit', minute: '2-digit' })
+                            : new Date(point.bucket_start).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' }))
+                        : '—'}
+                    </Button>
+                  )
+                })}
                 {buckets.length > bucketListVisible && (
                   <Button size="small" variant="outlined" onClick={() => setBucketListVisible((n) => n + 50)}>
                     Show more ({buckets.length - bucketListVisible} more)
@@ -555,7 +568,7 @@ export function EventDetail({
                           <TableRow>
                             <TableCell sx={{ minWidth: 72 }}>Runner</TableCell>
                             {ticksMergedByTime.map((row, i) => (
-                              <TableCell key={i} align="right" sx={{ minWidth: 90 }}>
+                              <TableCell key={i} align="left" sx={{ minWidth: 90 }}>
                                 {row.publish_time ? formatTime(row.publish_time, useUtc) : '—'}
                               </TableCell>
                             ))}
@@ -573,7 +586,7 @@ export function EventDetail({
                               <TableRow>
                                 <TableCell><strong>Home</strong></TableCell>
                                 {ticksMergedByTime.map((row, i) => (
-                                  <TableCell key={i} align="right">
+                                  <TableCell key={i} align="left">
                                     {formatOdds(row.home_back_odds).text} / {num(row.home_back_size ?? null)}
                                   </TableCell>
                                 ))}
@@ -581,7 +594,7 @@ export function EventDetail({
                               <TableRow>
                                 <TableCell><strong>Away</strong></TableCell>
                                 {ticksMergedByTime.map((row, i) => (
-                                  <TableCell key={i} align="right">
+                                  <TableCell key={i} align="left">
                                     {formatOdds(row.away_back_odds).text} / {num(row.away_back_size ?? null)}
                                   </TableCell>
                                 ))}
@@ -589,7 +602,7 @@ export function EventDetail({
                               <TableRow>
                                 <TableCell><strong>Draw</strong></TableCell>
                                 {ticksMergedByTime.map((row, i) => (
-                                  <TableCell key={i} align="right">
+                                  <TableCell key={i} align="left">
                                     {formatOdds(row.draw_back_odds).text} / {num(row.draw_back_size ?? null)}
                                   </TableCell>
                                 ))}
