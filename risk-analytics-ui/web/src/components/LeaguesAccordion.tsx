@@ -380,7 +380,7 @@ function DatePickerButton({
   )
 }
 
-/** Group events by competition. Two-level sort: country total desc, then competition count desc. Events within each: volume desc. */
+/** Group events by competition. Sort accordion sections: by event count desc, then competition name A–Z. Events within each: volume desc. */
 export function CompetitionAccordion({
   events,
   selectedDate,
@@ -432,27 +432,16 @@ export function CompetitionAccordion({
         eventsCountToday: evs.length,
       }
     })
-    const countryTotal = new Map<string, number>()
-    for (const c of comps) {
-      const cc = c.countryCode || '\uFFFF'
-      countryTotal.set(cc, (countryTotal.get(cc) ?? 0) + c.eventsCountToday)
-    }
     comps.sort((a, b) => {
-      const countryKeyA = a.countryCode || '\uFFFF'
-      const countryKeyB = b.countryCode || '\uFFFF'
-      const ca = countryTotal.get(countryKeyA) ?? 0
-      const cb = countryTotal.get(countryKeyB) ?? 0
-      if (cb !== ca) return cb - ca
-      if (countryKeyA !== countryKeyB) return countryKeyA.localeCompare(countryKeyB)
+      // 1) By number of events (desc – most events first)
       if (b.eventsCountToday !== a.eventsCountToday) return b.eventsCountToday - a.eventsCountToday
+      // 2) Then alphabetically by competition name
       return (a.name || '').localeCompare(b.name || '')
     })
     if (typeof window !== 'undefined' && import.meta.env?.DEV) {
       const sample = comps.slice(0, 10).map((c) => ({
         competitionName: c.name,
         competitionId: c.competitionId,
-        countryKey: c.countryCode || '(empty)',
-        countryEventsCountToday: countryTotal.get(c.countryCode || '\uFFFF'),
         eventsCountToday: c.eventsCountToday,
       }))
       console.log('[CompetitionAccordion] sort sample', sample)
