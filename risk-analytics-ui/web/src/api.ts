@@ -142,6 +142,10 @@ export type EventMeta = {
   home_selection_id?: number | null
   away_selection_id?: number | null
   draw_selection_id?: number | null
+  /** Runner outcome from settlement: WINNER, LOSER, REMOVED. */
+  home_runner_status?: string | null
+  away_runner_status?: string | null
+  draw_runner_status?: string | null
   has_raw_stream?: boolean
   has_full_raw_payload?: boolean
   supports_replay_snapshot?: boolean

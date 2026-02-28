@@ -155,7 +155,7 @@ def stream_event_timeseries(
 
 @stream_router.get("/events/{market_id}/meta")
 def stream_event_meta(market_id: str):
-    """Metadata from public.market_event_metadata; includes H/A/D selection IDs and replay support."""
+    """Metadata from public.market_event_metadata; includes H/A/D selection IDs, replay support, and runner settlement status."""
     with cursor() as cur:
         cur.execute(
             """
@@ -170,6 +170,33 @@ def stream_event_meta(market_id: str):
         row = cur.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Event not found")
+
+    # Runner settlement status from stream_ingest.market_runner_settlement (WINNER, LOSER, REMOVED)
+    home_runner_status = None
+    away_runner_status = None
+    draw_runner_status = None
+    home_sid = row.get("home_selection_id")
+    away_sid = row.get("away_selection_id")
+    draw_sid = row.get("draw_selection_id")
+    if home_sid is not None or away_sid is not None or draw_sid is not None:
+        with cursor() as cur:
+            cur.execute(
+                """
+                SELECT selection_id, runner_status
+                FROM stream_ingest.market_runner_settlement
+                WHERE market_id = %s AND selection_id = ANY(%s)
+                """,
+                (market_id, [s for s in [home_sid, away_sid, draw_sid] if s is not None]),
+            )
+            for r in cur.fetchall():
+                status = r.get("runner_status")
+                sid = r.get("selection_id")
+                if sid == home_sid:
+                    home_runner_status = status
+                elif sid == away_sid:
+                    away_runner_status = status
+                elif sid == draw_sid:
+                    draw_runner_status = status
 
     # Last tick time for replay (max publish_time in ladder_levels for this market)
     last_tick_time = None
@@ -205,6 +232,9 @@ def stream_event_meta(market_id: str):
         "home_selection_id": row.get("home_selection_id"),
         "away_selection_id": row.get("away_selection_id"),
         "draw_selection_id": row.get("draw_selection_id"),
+        "home_runner_status": home_runner_status,
+        "away_runner_status": away_runner_status,
+        "draw_runner_status": draw_runner_status,
         "has_raw_stream": False,
         "has_full_raw_payload": False,
         "supports_replay_snapshot": True,

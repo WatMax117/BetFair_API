@@ -314,7 +314,28 @@ export function EventDetail({
             </Paper>
           )}
           <Paper sx={{ p: 2, mb: 2 }}>
-            <Typography variant="h6">{meta.event_name || marketId}</Typography>
+            {(() => {
+              const homeName = meta.home_runner_name?.trim() || null
+              const awayName = meta.away_runner_name?.trim() || null
+              const homeStatus = meta.home_runner_status ?? null
+              const awayStatus = meta.away_runner_status ?? null
+              const drawStatus = meta.draw_runner_status ?? null
+              const isDraw = drawStatus === 'WINNER'
+              const homeWinner = homeStatus === 'WINNER'
+              const awayWinner = awayStatus === 'WINNER'
+              const homeColor = isDraw ? 'rgba(244, 67, 54, 0.9)' : homeWinner ? 'rgba(76, 175, 80, 0.9)' : undefined
+              const awayColor = isDraw ? 'rgba(244, 67, 54, 0.9)' : awayWinner ? 'rgba(76, 175, 80, 0.9)' : undefined
+              if (homeName && awayName) {
+                return (
+                  <Typography variant="h6" component="div">
+                    <span style={homeColor ? { color: homeColor } : undefined}>{homeName}</span>
+                    {' vs '}
+                    <span style={awayColor ? { color: awayColor } : undefined}>{awayName}</span>
+                  </Typography>
+                )
+              }
+              return <Typography variant="h6">{meta.event_name || marketId}</Typography>
+            })()}
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
               <Typography color="text.secondary">
                 {meta.competition_name} · Start: {formatTime(meta.event_open_date, useUtc)}
