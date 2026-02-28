@@ -323,15 +323,24 @@ export function EventDetail({
               const isDraw = drawStatus === 'WINNER'
               const homeWinner = homeStatus === 'WINNER'
               const awayWinner = awayStatus === 'WINNER'
+              const hasResult = homeWinner || awayWinner || isDraw
               const homeColor = isDraw ? 'rgba(244, 67, 54, 0.9)' : homeWinner ? 'rgba(76, 175, 80, 0.9)' : undefined
               const awayColor = isDraw ? 'rgba(244, 67, 54, 0.9)' : awayWinner ? 'rgba(76, 175, 80, 0.9)' : undefined
+              const resultLabel = hasResult
+                ? (isDraw ? 'Draw' : homeWinner ? 'Home win' : awayWinner ? 'Away win' : '—')
+                : null
               if (homeName && awayName) {
                 return (
-                  <Typography variant="h6" component="div">
-                    <span style={homeColor ? { color: homeColor } : undefined}>{homeName}</span>
-                    {' vs '}
-                    <span style={awayColor ? { color: awayColor } : undefined}>{awayName}</span>
-                  </Typography>
+                  <>
+                    <Typography variant="h6" component="div">
+                      <span style={homeColor ? { color: homeColor } : undefined}>{homeName}</span>
+                      {' vs '}
+                      <span style={awayColor ? { color: awayColor } : undefined}>{awayName}</span>
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                      Result: {resultLabel ?? '— (settlement not recorded)'}
+                    </Typography>
+                  </>
                 )
               }
               return <Typography variant="h6">{meta.event_name || marketId}</Typography>

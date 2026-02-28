@@ -193,14 +193,21 @@ def stream_event_meta(market_id: str):
                 for r in cur.fetchall():
                     status = r.get("runner_status")
                     sid = r.get("selection_id")
-                    if sid == home_sid:
+                    # Normalize to int for comparison (DB may return long)
+                    sid_int = int(sid) if sid is not None else None
+                    if sid_int == home_sid:
                         home_runner_status = status
-                    elif sid == away_sid:
+                    elif sid_int == away_sid:
                         away_runner_status = status
-                    elif sid == draw_sid:
+                    elif sid_int == draw_sid:
                         draw_runner_status = status
+                if home_runner_status or away_runner_status or draw_runner_status:
+                    logger.info(
+                        "event_meta settlement market_id=%s home=%s away=%s draw=%s",
+                        market_id, home_runner_status, away_runner_status, draw_runner_status,
+                    )
         except Exception as e:
-            logger.debug("event meta: settlement lookup skipped (%s)", e)
+            logger.warning("event meta: settlement lookup failed for market_id=%s (%s)", market_id, e)
 
     # Last tick time for replay (max publish_time in ladder_levels for this market)
     last_tick_time = None
