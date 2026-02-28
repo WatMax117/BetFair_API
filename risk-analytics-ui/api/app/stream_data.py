@@ -144,6 +144,21 @@ def _latest_publish_before(cur: Any, market_id: str, bucket_time: datetime) -> O
     return row["t"] if row and row.get("t") else None
 
 
+def _first_publish_in_bucket(
+    cur: Any, market_id: str, bucket_start: datetime, bucket_end: datetime
+) -> Optional[datetime]:
+    """Earliest publish_time in [bucket_start, bucket_end) for this market. Used to include buckets that have ticks only inside the bucket."""
+    cur.execute(
+        """
+        SELECT MIN(publish_time) AS t
+        FROM stream_ingest.ladder_levels
+        WHERE market_id = %s AND publish_time >= %s AND publish_time < %s
+        """,
+        (market_id, bucket_start, bucket_end),
+    )
+    row = cur.fetchone()
+    return row["t"] if row and row.get("t") else None
+
 def compute_book_risk_from_medians(
     home_odds_median: Optional[float],
     home_size_median: Optional[float],
@@ -585,6 +600,7 @@ def get_events_by_date_rest_driven(date_str: str) -> List[Dict[str, Any]]:
         cur.execute(
             """
             SELECT rm.market_id, rm.event_id, rm.market_type, rm.market_name,
+                   rm.total_matched AS rest_total_matched,
                    re.event_name AS re_event_name, re.home_team, re.away_team,
                    re.open_date AS event_open_date, re.competition_name
             FROM rest_markets rm
@@ -726,6 +742,14 @@ def get_events_by_date_rest_driven(date_str: str) -> List[Dict[str, Any]]:
         # Fallback: show volume from liquidity when we have liquidity but no ladder
         if total_volume is None and market_id in liquidity_volume_by_market:
             total_volume = liquidity_volume_by_market[market_id]
+        # Fallback: REST-level comparison from listMarketCatalogue (rest_markets.total_matched)
+        rest_total_matched = m.get("rest_total_matched")
+        if total_volume is None and rest_total_matched is not None:
+            try:
+                total_volume = float(rest_total_matched)
+            except (TypeError, ValueError):
+                pass
+        rest_total_matched_out = float(rest_total_matched) if rest_total_matched is not None else None
 
         result.append({
             "market_id": market_id,
@@ -743,6 +767,7 @@ def get_events_by_date_rest_driven(date_str: str) -> List[Dict[str, Any]]:
             "away_best_lay": away_bl,
             "draw_best_lay": draw_bl,
             "total_volume": total_volume,
+            "rest_total_matched": rest_total_matched_out,
             "depth_limit": DEPTH_LIMIT,
             "calculation_version": "stream_15min",
             "home_book_risk_l3": book_risk["home_book_risk_l3"] if book_risk else None,
@@ -1431,6 +1456,8 @@ def get_event_buckets_stream(market_id: str) -> List[Dict[str, Any]]:
 
         with cursor() as cur:
             last_pt = _latest_publish_before(cur, market_id, bucket_time)
+            if last_pt is None:
+                last_pt = _first_publish_in_bucket(cur, market_id, bucket_start, bucket_end)
             if last_pt is None:
                 continue
 
