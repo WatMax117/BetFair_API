@@ -326,24 +326,25 @@ export function EventDetail({
               const hasResult = homeWinner || awayWinner || isDraw
               const homeColor = isDraw ? 'rgba(244, 67, 54, 0.9)' : homeWinner ? 'rgba(76, 175, 80, 0.9)' : undefined
               const awayColor = isDraw ? 'rgba(244, 67, 54, 0.9)' : awayWinner ? 'rgba(76, 175, 80, 0.9)' : undefined
-              const resultLabel = hasResult
+              const resultText = hasResult
                 ? (isDraw ? 'Draw' : homeWinner ? 'Home win' : awayWinner ? 'Away win' : '—')
-                : null
-              if (homeName && awayName) {
-                return (
-                  <>
+                : '— (settlement not recorded)'
+              return (
+                <>
+                  {homeName && awayName ? (
                     <Typography variant="h6" component="div">
                       <span style={homeColor ? { color: homeColor } : undefined}>{homeName}</span>
                       {' vs '}
                       <span style={awayColor ? { color: awayColor } : undefined}>{awayName}</span>
                     </Typography>
-                    <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                      Result: {resultLabel ?? '— (settlement not recorded)'}
-                    </Typography>
-                  </>
-                )
-              }
-              return <Typography variant="h6">{meta.event_name || marketId}</Typography>
+                  ) : (
+                    <Typography variant="h6">{meta.event_name || marketId}</Typography>
+                  )}
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                    Result: {resultText}
+                  </Typography>
+                </>
+              )
             })()}
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
               <Typography color="text.secondary">
