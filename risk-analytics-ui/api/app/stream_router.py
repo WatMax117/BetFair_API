@@ -172,6 +172,7 @@ def stream_event_meta(market_id: str):
         raise HTTPException(status_code=404, detail="Event not found")
 
     # Runner settlement status from stream_ingest.market_runner_settlement (WINNER, LOSER, REMOVED)
+    # Optional: table may not exist if V11 migration not run; leave statuses null on any error.
     home_runner_status = None
     away_runner_status = None
     draw_runner_status = None
@@ -179,24 +180,27 @@ def stream_event_meta(market_id: str):
     away_sid = row.get("away_selection_id")
     draw_sid = row.get("draw_selection_id")
     if home_sid is not None or away_sid is not None or draw_sid is not None:
-        with cursor() as cur:
-            cur.execute(
-                """
-                SELECT selection_id, runner_status
-                FROM stream_ingest.market_runner_settlement
-                WHERE market_id = %s AND selection_id = ANY(%s)
-                """,
-                (market_id, [s for s in [home_sid, away_sid, draw_sid] if s is not None]),
-            )
-            for r in cur.fetchall():
-                status = r.get("runner_status")
-                sid = r.get("selection_id")
-                if sid == home_sid:
-                    home_runner_status = status
-                elif sid == away_sid:
-                    away_runner_status = status
-                elif sid == draw_sid:
-                    draw_runner_status = status
+        try:
+            with cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT selection_id, runner_status
+                    FROM stream_ingest.market_runner_settlement
+                    WHERE market_id = %s AND selection_id = ANY(%s)
+                    """,
+                    (market_id, [s for s in [home_sid, away_sid, draw_sid] if s is not None]),
+                )
+                for r in cur.fetchall():
+                    status = r.get("runner_status")
+                    sid = r.get("selection_id")
+                    if sid == home_sid:
+                        home_runner_status = status
+                    elif sid == away_sid:
+                        away_runner_status = status
+                    elif sid == draw_sid:
+                        draw_runner_status = status
+        except Exception as e:
+            logger.debug("event meta: settlement lookup skipped (%s)", e)
 
     # Last tick time for replay (max publish_time in ladder_levels for this market)
     last_tick_time = None
